@@ -16,6 +16,12 @@ pub struct AppSettings {
     pub time_zone: String,
     pub saved_ble_device_id: String,
     pub saved_ble_device_name: String,
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    #[serde(default)]
+    pub longitude: Option<f64>,
+    #[serde(skip)]
+    pub has_gemini_api_key: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -72,32 +78,52 @@ pub fn save_automation_config(app: &AppHandle, config: &AutomationConfig) -> Res
 }
 
 const KEYCHAIN_SERVICE: &str = "com.mohtashimali.solarhub";
-const KEYCHAIN_ACCOUNT: &str = "solar-password";
+const SOLAR_PASSWORD_ACCOUNT: &str = "solar-password";
+const GEMINI_API_KEY_ACCOUNT: &str = "gemini-api-key";
 
-pub fn get_solar_password() -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .map_err(|error| error.to_string())?;
+fn keychain_get(account: &str) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|error| error.to_string())?;
     match entry.get_password() {
-        Ok(password) => Ok(Some(password)),
+        Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(other) => Err(other.to_string()),
     }
 }
 
-pub fn set_solar_password(password: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .map_err(|error| error.to_string())?;
-    entry
-        .set_password(password)
-        .map_err(|error| error.to_string())
+fn keychain_set(account: &str, value: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|error| error.to_string())?;
+    entry.set_password(value).map_err(|error| error.to_string())
 }
 
-pub fn clear_solar_password() -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .map_err(|error| error.to_string())?;
+fn keychain_clear(account: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|error| error.to_string())?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(other) => Err(other.to_string()),
     }
+}
+
+pub fn get_solar_password() -> Result<Option<String>, String> {
+    keychain_get(SOLAR_PASSWORD_ACCOUNT)
+}
+
+pub fn set_solar_password(password: &str) -> Result<(), String> {
+    keychain_set(SOLAR_PASSWORD_ACCOUNT, password)
+}
+
+pub fn clear_solar_password() -> Result<(), String> {
+    keychain_clear(SOLAR_PASSWORD_ACCOUNT)
+}
+
+pub fn get_gemini_api_key() -> Result<Option<String>, String> {
+    keychain_get(GEMINI_API_KEY_ACCOUNT)
+}
+
+pub fn set_gemini_api_key(key: &str) -> Result<(), String> {
+    keychain_set(GEMINI_API_KEY_ACCOUNT, key)
+}
+
+pub fn clear_gemini_api_key() -> Result<(), String> {
+    keychain_clear(GEMINI_API_KEY_ACCOUNT)
 }

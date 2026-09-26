@@ -175,6 +175,19 @@ fn step_rule(latch: &mut Option<bool>, fires: Option<bool>, clears: Option<bool>
     false
 }
 
+/// Lets callers that only need to send a notification (the automation runner)
+/// depend on this instead of the concrete `Notifier`, so tests can swap in a
+/// fake that doesn't need a real `AppHandle`.
+pub trait NotificationSink: Send + Sync {
+    fn send(&self, title: &str, body: &str);
+}
+
+impl NotificationSink for Notifier {
+    fn send(&self, title: &str, body: &str) {
+        Notifier::send(self, title, body);
+    }
+}
+
 struct NotifierInner {
     app: AppHandle,
     enabled: AtomicBool,

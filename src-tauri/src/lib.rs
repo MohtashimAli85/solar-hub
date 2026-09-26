@@ -67,8 +67,10 @@ pub fn run() {
 
             let inverter = InverterState::new(client.clone());
             let battery = BatteryState::new();
-            let automation = AutomationState::new(load_automation_config(&handle));
+            let automation_config = load_automation_config(&handle);
             let notifier = notifications::Notifier::new(handle.clone());
+            notifier.set_enabled(automation_config.notifications_enabled);
+            let automation = AutomationState::new(automation_config);
 
             app.manage(inverter.clone());
             app.manage(battery.clone());
@@ -82,7 +84,7 @@ pub fn run() {
                 automation: automation.clone(),
             });
 
-            automation::engine::spawn_engine(automation, client, battery, notifier, handle.clone());
+            automation::runner::spawn(automation, client, battery, notifier, handle.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -113,7 +115,6 @@ pub fn run() {
             automation::commands::get_automation_config,
             automation::commands::update_automation_config,
             automation::commands::force_automation_check,
-            automation::commands::dismiss_automation_warning,
             automation::commands::send_test_notification,
         ])
         .run(tauri::generate_context!())

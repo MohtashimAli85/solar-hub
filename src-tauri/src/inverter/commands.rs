@@ -6,8 +6,8 @@ use super::types::{DeviceDetails, InverterSettings, InverterSnapshot};
 use super::InverterState;
 use crate::events;
 use crate::storage::{
-    AppSettings, clear_solar_password, get_solar_password, load_app_settings, save_app_settings,
-    set_solar_password,
+    clear_gemini_api_key, clear_solar_password, get_gemini_api_key, get_solar_password,
+    load_app_settings, save_app_settings, set_gemini_api_key, set_solar_password, AppSettings,
 };
 
 #[tauri::command]
@@ -190,13 +190,21 @@ pub struct SolarSettingsInput {
     pub time_zone: String,
     #[serde(default)]
     pub password: Option<String>,
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    #[serde(default)]
+    pub longitude: Option<f64>,
+    #[serde(default)]
+    pub gemini_api_key: Option<String>,
 }
 
 #[tauri::command]
 pub async fn get_solar_settings(app: AppHandle) -> Result<AppSettings, String> {
-    // The password is intentionally not returned — it lives in the OS
-    // keychain and is only read by the client at request time.
-    Ok(load_app_settings(&app))
+    // The password and Gemini key are intentionally not returned — they live
+    // in the OS keychain and are only read by their clients at request time.
+    let mut settings = load_app_settings(&app);
+    settings.has_gemini_api_key = get_gemini_api_key()?.is_some();
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -210,6 +218,8 @@ pub async fn update_solar_settings(
         station_id: input.station_id.trim().to_string(),
         device_id: input.device_id.trim().to_string(),
         time_zone: input.time_zone.trim().to_string(),
+        latitude: input.latitude,
+        longitude: input.longitude,
         ..load_app_settings(&app)
     };
     save_app_settings(&app, &settings)?;
@@ -218,6 +228,13 @@ pub async fn update_solar_settings(
             clear_solar_password()?;
         } else {
             set_solar_password(&password)?;
+        }
+    }
+    if let Some(gemini_api_key) = input.gemini_api_key {
+        if gemini_api_key.is_empty() {
+            clear_gemini_api_key()?;
+        } else {
+            set_gemini_api_key(&gemini_api_key)?;
         }
     }
     let stored_password = get_solar_password()
@@ -231,5 +248,7 @@ pub async fn update_solar_settings(
         time_zone: settings.time_zone.clone(),
     };
     state.solar_client().set_credentials(credentials).await;
+    let mut settings = settings;
+    settings.has_gemini_api_key = get_gemini_api_key()?.is_some();
     Ok(settings)
 }

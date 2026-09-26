@@ -133,3 +133,91 @@ pub fn charger_mode_name(value: u32) -> String {
         .get(value as usize)
         .map_or("Unknown".to_string(), |name| name.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn flow(watts: f64, unit: &str) -> Value {
+        json!({ "value": { "value": watts, "unit": unit } })
+    }
+
+    fn snapshot_with(soc: f64, discharge_a: f64, capacity_ah: f64, mode: u32) -> InverterSnapshot {
+        snapshot_with_flows(soc, discharge_a, capacity_ah, mode, None, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn snapshot_with_flows(
+        soc: f64,
+        discharge_a: f64,
+        capacity_ah: f64,
+        mode: u32,
+        pv_w: Option<f64>,
+        load_w: Option<f64>,
+        ac_input_voltage: Option<f64>,
+    ) -> InverterSnapshot {
+        let mut fields = Map::new();
+        fields.insert("batterySOC".into(), json!({"value": soc.to_string()}));
+        fields.insert(
+            "batteryDischargeCurrent".into(),
+            json!({"value": discharge_a.to_string()}),
+        );
+        fields.insert("batteryCapacity".into(), json!({"value": capacity_ah.to_string()}));
+        if let Some(voltage) = ac_input_voltage {
+            fields.insert("acInputVoltage".into(), json!({"value": voltage.to_string()}));
+        }
+        InverterSnapshot {
+            device_id: "test".into(),
+            fields,
+            groups: vec![],
+            firing_alarms: vec![],
+            settings: Some(InverterSettings {
+                output_source_priority: output_mode_name(mode),
+                output_source_priority_value: Some(mode),
+                charger_source_priority: "Solar + Utility".into(),
+                charger_source_priority_value: Some(0),
+                ac_input_range: None,
+                battery_power_limiting: None,
+                low_battery_cutoff_voltage: None,
+                high_cutoff_voltage: None,
+                low_dc_cutoff_soc: None,
+                max_total_charge_current: None,
+                max_utility_charge_current: None,
+                smart_load: None,
+            }),
+            pv_panel_flow: pv_w.map(|watts| flow(watts, "W")),
+            grid_flow: None,
+            load_flow: load_w.map(|watts| flow(watts, "W")),
+        }
+    }
+
+    #[test]
+    fn snapshot_reads_latest_field_values() {
+        let snapshot = snapshot_with(80.0, 20.0, 100.0, 0);
+        assert_eq!(snapshot.field(&["batterySOC"]), Some(80.0));
+        assert_eq!(snapshot.field(&["batteryDischargeCurrent"]), Some(20.0));
+        assert_eq!(snapshot.field(&["batteryCapacity"]), Some(100.0));
+    }
+
+    #[test]
+    fn flow_watts_reads_scalar_and_kilowatt_flows() {
+        let snapshot = snapshot_with_flows(80.0, 0.0, 100.0, 0, Some(1500.0), Some(200.0), Some(230.0));
+        assert_eq!(snapshot.pv_watts(), Some(1500.0));
+        assert_eq!(snapshot.load_watts(), Some(200.0));
+        assert_eq!(snapshot.grid_on(), Some(true));
+
+        let kilowatt = InverterSnapshot {
+            pv_panel_flow: Some(flow(1.5, "kW")),
+            ..snapshot.clone()
+        };
+        assert_eq!(kilowatt.pv_watts(), Some(1500.0));
+    }
+
+    #[test]
+    fn grid_on_flags_mains_below_100_volts() {
+        assert_eq!(snapshot_with_flows(80.0, 0.0, 100.0, 0, None, None, Some(0.0)).grid_on(), Some(false));
+        assert_eq!(snapshot_with_flows(80.0, 0.0, 100.0, 0, None, None, Some(231.0)).grid_on(), Some(true));
+        assert_eq!(snapshot_with(80.0, 0.0, 100.0, 0).grid_on(), None);
+    }
+}
