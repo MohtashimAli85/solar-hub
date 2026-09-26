@@ -13,7 +13,10 @@ export function run({ latitude, longitude }, date = new Date()) {
 if (isMainModule(import.meta.url)) {
   readStdin()
     .then((raw) => run(JSON.parse(raw)))
-    .then((result) => process.stdout.write(JSON.stringify(result)))
+    .then((result) => {
+      process.stdout.write(JSON.stringify(result));
+      process.exit(0);
+    })
     .catch((error) => {
       console.error(error);
       process.exit(1);

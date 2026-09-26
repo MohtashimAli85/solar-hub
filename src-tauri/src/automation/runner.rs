@@ -23,6 +23,7 @@ const VERIFY_SETTLE: Duration = Duration::from_secs(150);
 const VERIFY_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 const VERIFY_SAMPLES_NEEDED: usize = 5;
 const FAST_TICK: Duration = Duration::from_secs(60);
+const MAX_VERIFY_FAILURES: u32 = 3;
 
 pub fn spawn(state: AutomationState, client: SolarClient, battery: BatteryState, notifier: Notifier, app: AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -153,6 +154,7 @@ struct NightMemory {
     decision_reason: String,
     verify_started_at: Option<Instant>,
     verify_samples: Vec<f64>,
+    verify_failures: u32,
     engagements: u32,
     ai_failure_notified: bool,
 }
@@ -168,6 +170,7 @@ impl Default for NightMemory {
             decision_reason: String::new(),
             verify_started_at: None,
             verify_samples: Vec::new(),
+            verify_failures: 0,
             engagements: 0,
             ai_failure_notified: false,
         }
@@ -419,6 +422,9 @@ async fn night_deciding(
     if reading.mode == Some(SBG_MODE) {
         memory.night.previous_mode = Some(SOLAR_MODE);
         memory.night.decision_reason = "already on SBG at the start of the window".into();
+        state
+            .set_status(|status| status.ai_reason = Some(memory.night.decision_reason.clone()))
+            .await;
         enter_verifying(state, &mut memory.night).await;
         return FAST_TICK;
     }
@@ -427,7 +433,6 @@ async fn night_deciding(
     if !due {
         return normal_interval(config);
     }
-    memory.night.last_decide_at = Some(Instant::now());
 
     let discharge_a = estimate_discharge_a(reading.load_w, reading.pv_w, reading.batt_v).unwrap_or(reading.discharge_a);
     let input = DecideInput {
@@ -445,6 +450,8 @@ async fn night_deciding(
         Err(error) => return ai_failure(state, notifier, config, &mut memory.night.ai_failure_notified, error, "Solar").await,
     };
     memory.night.ai_failure_notified = false;
+    memory.night.last_decide_at = Some(Instant::now());
+    state.set_status(|status| status.ai_reason = Some(decision.reason.clone())).await;
 
     if decision.mode != "sbg" {
         return normal_interval(config);
@@ -481,7 +488,24 @@ async fn enter_verifying(state: &AutomationState, night: &mut NightMemory) {
     night.phase = NightPhase::Verifying;
     night.verify_started_at = Some(Instant::now());
     night.verify_samples.clear();
+    night.verify_failures = 0;
     state.set_status(|status| status.phase = Phase::NightVerifying).await;
+}
+
+async fn give_up_verifying(
+    state: &AutomationState,
+    client: &SolarClient,
+    notifier: &dyn NotificationSink,
+    config: &AutomationConfig,
+    memory: &mut EngineMemory,
+) -> Duration {
+    revert_night(client, config, &mut memory.night).await;
+    notify_action(state, notifier, config.dry_run, "revert to Solar — AI unavailable during verification").await;
+    memory.night.phase = NightPhase::Deciding;
+    memory.night.last_decide_at = None;
+    memory.night.verify_failures = 0;
+    state.set_status(|status| status.phase = Phase::NightDeciding).await;
+    normal_interval(config)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -525,9 +549,19 @@ async fn night_verifying(
     };
     let verification = match agent.run_verify(verify_input).await {
         Ok(verification) => verification,
-        Err(error) => return ai_failure(state, notifier, config, &mut memory.night.ai_failure_notified, error, "SBG").await,
+        Err(error) => {
+            memory.night.verify_failures += 1;
+            if memory.night.verify_failures >= MAX_VERIFY_FAILURES {
+                return give_up_verifying(state, client, notifier, config, memory).await;
+            }
+            memory.night.verify_samples.clear();
+            memory.night.verify_started_at = Some(Instant::now());
+            return ai_failure(state, notifier, config, &mut memory.night.ai_failure_notified, error, "SBG").await;
+        }
     };
     memory.night.ai_failure_notified = false;
+    memory.night.verify_failures = 0;
+    state.set_status(|status| status.ai_reason = Some(verification.reason.clone())).await;
 
     if verification.verified {
         memory.night.phase = NightPhase::Holding;
@@ -548,8 +582,18 @@ async fn night_verifying(
     };
     let decision = match agent.run_decide(redecide_input).await {
         Ok(decision) => decision,
-        Err(error) => return ai_failure(state, notifier, config, &mut memory.night.ai_failure_notified, error, "SBG").await,
+        Err(error) => {
+            memory.night.verify_failures += 1;
+            if memory.night.verify_failures >= MAX_VERIFY_FAILURES {
+                return give_up_verifying(state, client, notifier, config, memory).await;
+            }
+            memory.night.verify_samples.clear();
+            memory.night.verify_started_at = Some(Instant::now());
+            return ai_failure(state, notifier, config, &mut memory.night.ai_failure_notified, error, "SBG").await;
+        }
     };
+    memory.night.verify_failures = 0;
+    state.set_status(|status| status.ai_reason = Some(decision.reason.clone())).await;
 
     if decision.mode != "sbg" {
         revert_night(client, config, &mut memory.night).await;
@@ -630,6 +674,7 @@ async fn morning_tick(
         Err(error) => return ai_failure(state, notifier, config, &mut memory.morning.ai_failure_notified, error, "current mode").await,
     };
     memory.morning.ai_failure_notified = false;
+    state.set_status(|status| status.ai_reason = Some(decision.reason.clone())).await;
 
     let target_mode = if decision.mode == "sbg" { SBG_MODE } else { SOLAR_MODE };
     if reading.mode == Some(target_mode) {

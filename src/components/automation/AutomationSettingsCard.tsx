@@ -154,6 +154,11 @@ export function AutomationSettingsCard() {
             sunrise <span className="text-foreground">{fmtTime(status.sunrise)}</span>
           </span>
         </div>
+        {status.ai_reason ? (
+          <p className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-[13px] italic text-muted-foreground">
+            "{status.ai_reason}"
+          </p>
+        ) : null}
 
         <div className="grid gap-5 sm:grid-cols-2">
           <div className="space-y-3">

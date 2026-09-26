@@ -98,6 +98,7 @@ export interface AutomationStatus {
   sunrise: string | null;
   sunset: string | null;
   blocked_reason: string | null;
+  ai_reason: string | null;
 }
 
 export interface AppSettings {

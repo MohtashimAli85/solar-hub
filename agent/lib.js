@@ -69,6 +69,7 @@ export async function runAgent({ schema, buildPrompt }) {
 
   const result = await generateStructured({ schema, prompt: buildPrompt(input) });
   process.stdout.write(JSON.stringify(result));
+  process.exit(0);
 }
 
 export function isMainModule(url) {

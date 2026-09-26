@@ -41,6 +41,7 @@ pub struct AutomationStatus {
     pub sunrise: Option<String>,
     pub sunset: Option<String>,
     pub blocked_reason: Option<String>,
+    pub ai_reason: Option<String>,
 }
 
 impl Default for AutomationStatus {
@@ -54,6 +55,7 @@ impl Default for AutomationStatus {
             sunrise: None,
             sunset: None,
             blocked_reason: None,
+            ai_reason: None,
         }
     }
 }
