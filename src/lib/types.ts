@@ -64,71 +64,40 @@ export interface InverterSnapshot {
 
 export interface AutomationConfig {
   enabled: boolean;
+  dry_run: boolean;
   check_interval_minutes: number;
-  window_start_hour: number;
-  window_end_hour: number;
   min_soc_percent: number;
-  reserve_soc_percent: number;
   capacity_ah: number;
-  target_hour: number;
-  safety_margin_hours: number;
-  day_pv_threshold_watts: number;
-  day_discharge_threshold_a: number;
+  sunrise_buffer_hours: number;
+  morning_window_hours: number;
+  morning_charge_threshold_a: number;
+  pv_array_watts: number;
   notifications_enabled: boolean;
-  probe_required_samples: number;
-  min_hold_minutes: number;
-  deficit_tolerance_hours: number;
-  high_soc_hold_percent: number;
-  hold_failures_before_revert: number;
 }
 
-export interface AutomationLogEntry {
-  timestamp: string;
-  message: string;
-}
-
-export interface AutomationWarning {
+export interface AutomationLastEvent {
   timestamp: string;
   message: string;
 }
 
 export type AutomationPhase =
-  | "day"
-  | "waiting"
-  | "probing"
-  | "holding"
-  | "backed_off"
-  | "user_override"
-  | "low_soc";
-
-export interface AutomationLiveStatus {
-  soc: number | null;
-  battery_current_a: number | null;
-  pv_w: number | null;
-  load_w: number | null;
-  grid_on: boolean | null;
-  smart_load: number | null;
-}
-
-export interface AutomationEstimate {
-  discharge_a: number | null;
-  runtime_h: number | null;
-}
+  | "idle"
+  | "night_deciding"
+  | "night_verifying"
+  | "night_holding"
+  | "paused"
+  | "morning"
+  | "blocked";
 
 export interface AutomationStatus {
   enabled: boolean;
-  last_check: string | null;
-  current_mode_name: string | null;
-  warning: AutomationWarning | null;
-  automation_engaged: boolean;
+  dry_run: boolean;
   phase: AutomationPhase;
-  next_check: string | null;
-  live: AutomationLiveStatus;
-  estimate: AutomationEstimate;
-  verified: AutomationEstimate;
-  required_h: number | null;
-  data_source: "bms" | "inverter" | null;
-  logs: AutomationLogEntry[];
+  mode_name: string | null;
+  last_event: AutomationLastEvent | null;
+  sunrise: string | null;
+  sunset: string | null;
+  blocked_reason: string | null;
 }
 
 export interface AppSettings {
@@ -138,6 +107,9 @@ export interface AppSettings {
   time_zone: string;
   saved_ble_device_id: string;
   saved_ble_device_name: string;
+  latitude: number | null;
+  longitude: number | null;
+  has_gemini_api_key: boolean;
 }
 
 export interface SolarSettingsInput {
@@ -146,6 +118,9 @@ export interface SolarSettingsInput {
   device_id: string;
   time_zone: string;
   password?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  gemini_api_key?: string;
 }
 
 export interface DeviceDetails {

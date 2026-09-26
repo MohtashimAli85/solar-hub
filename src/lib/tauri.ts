@@ -88,10 +88,6 @@ export const getAutomationConfig = () =>
 export const updateAutomationConfig = (config: AutomationConfig) =>
   invoke<AutomationConfig>("update_automation_config", { config });
 
-export const forceAutomationCheck = () =>
-  invoke<AutomationStatus>("force_automation_check");
-
-export const dismissAutomationWarning = () =>
-  invoke<AutomationStatus>("dismiss_automation_warning");
+export const forceAutomationCheck = () => invoke<void>("force_automation_check");
 
 export const sendTestNotification = () => invoke<void>("send_test_notification");

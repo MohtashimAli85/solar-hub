@@ -1,22 +1,20 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Battery, Gauge, Moon, MoonStar, Settings, Sun } from "lucide-react";
+import { Battery, Gauge, Moon, Settings, Sun } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/useTheme";
 import { Button } from "@/components/ui/button";
-import { AutomationPage } from "@/pages/AutomationPage";
 import { BatteryPage } from "@/pages/BatteryPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { InverterPage } from "@/pages/InverterPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 
-type Tab = "dashboard" | "battery" | "inverter" | "automation" | "settings";
+type Tab = "dashboard" | "battery" | "inverter" | "settings";
 
 const TABS: { id: Tab; label: string; icon: typeof Gauge }[] = [
   { id: "dashboard", label: "Dashboard", icon: Gauge },
   { id: "battery", label: "Battery", icon: Battery },
   { id: "inverter", label: "Inverter", icon: Sun },
-  { id: "automation", label: "Automation", icon: MoonStar },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -76,7 +74,6 @@ function Shell() {
         {tab === "dashboard" ? <DashboardPage /> : null}
         {tab === "battery" ? <BatteryPage /> : null}
         {tab === "inverter" ? <InverterPage /> : null}
-        {tab === "automation" ? <AutomationPage /> : null}
         {tab === "settings" ? <SettingsPage /> : null}
       </main>
     </div>

@@ -80,7 +80,7 @@ export function OutputSourcePanel({
         })}
       </div>
       <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
-        Manual changes always win — automation treats them as a new baseline.
+        Manual changes pause automation until the next window.
       </p>
 
       <div

@@ -1,4 +1,4 @@
-import { AutomationStatusCard, automationPhaseLabel } from "@/components/automation/AutomationStatusCard";
+import { automationPhaseLabel } from "@/components/automation/AutomationSettingsCard";
 import { CommandHero } from "@/components/dashboard/CommandHero";
 import { OutputSourcePanel } from "@/components/inverter/OutputSourcePanel";
 import { fieldPowerWatts, fieldValue, flowPowerWatts, fmtNumber } from "@/lib/format";
@@ -59,14 +59,13 @@ export function DashboardPage() {
             <span>
               charger <span className="text-foreground">{settings?.charger_source_priority ?? "–"}</span>
             </span>
-            <span>
-              {automation.status?.automation_engaged ? "auto holding SBG" : "automation idle"}
-              {automation.status?.phase ? ` · ${automationPhaseLabel(automation.status.phase)}` : ""}
-            </span>
+            {automation.status ? (
+              <span>
+                automation <span className="text-foreground">{automationPhaseLabel(automation.status.phase)}</span>
+                {automation.status.last_event ? ` · ${automation.status.last_event.message}` : ""}
+              </span>
+            ) : null}
           </div>
-        </div>
-        <div className="lg:col-span-2">
-          <AutomationStatusCard status={automation.status} limit={5} isLoading={automation.isLoading} />
         </div>
       </div>
     </div>

@@ -2,7 +2,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import {
-  dismissAutomationWarning,
   forceAutomationCheck,
   getAutomationConfig,
   getAutomationStatus,
@@ -43,19 +42,13 @@ export function useAutomation() {
     onSuccess: (config) => {
       queryClient.setQueryData(CONFIG_KEY, config);
       queryClient.setQueryData(STATUS_KEY, (previous: AutomationStatus | undefined) =>
-        previous ? { ...previous, enabled: config.enabled } : previous,
+        previous ? { ...previous, enabled: config.enabled, dry_run: config.dry_run } : previous,
       );
     },
   });
 
   const checkNow = useMutation({
     mutationFn: forceAutomationCheck,
-    onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
-  });
-
-  const dismissWarning = useMutation({
-    mutationFn: dismissAutomationWarning,
-    onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
   });
 
   const testNotification = useMutation({
@@ -68,7 +61,6 @@ export function useAutomation() {
     isLoading: statusQuery.isLoading || configQuery.isLoading,
     saveConfig,
     checkNow,
-    dismissWarning,
     testNotification,
   };
 }

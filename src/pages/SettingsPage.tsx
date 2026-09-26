@@ -1,3 +1,4 @@
+import { AutomationSettingsCard } from "@/components/automation/AutomationSettingsCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
@@ -13,6 +14,17 @@ interface FormState {
   device_id: string;
   time_zone: string;
   password: string;
+  location: string;
+  gemini_api_key: string;
+  has_gemini_api_key: boolean;
+}
+
+function parseLocation(value: string): { latitude: number | null; longitude: number | null } {
+  const parts = value.split(",").map((part) => part.trim());
+  if (parts.length !== 2) return { latitude: null, longitude: null };
+  const [latitude, longitude] = parts.map(Number);
+  if (Number.isNaN(latitude) || Number.isNaN(longitude)) return { latitude: null, longitude: null };
+  return { latitude, longitude };
 }
 
 export function SettingsPage() {
@@ -30,6 +42,12 @@ export function SettingsPage() {
           device_id: settings.device_id,
           time_zone: settings.time_zone || "Asia/Karachi",
           password: "",
+          location:
+            settings.latitude != null && settings.longitude != null
+              ? `${settings.latitude}, ${settings.longitude}`
+              : "",
+          gemini_api_key: "",
+          has_gemini_api_key: settings.has_gemini_api_key,
         }),
       )
       .catch((caught) => setError(String(caught)));
@@ -46,15 +64,24 @@ export function SettingsPage() {
     setMessage(null);
     setError(null);
     try {
-      await updateSolarSettings({
+      const { latitude, longitude } = parseLocation(form.location);
+      const settings = await updateSolarSettings({
         user_id: form.user_id,
         station_id: form.station_id,
         device_id: form.device_id,
         time_zone: form.time_zone,
         password: form.password || undefined,
+        latitude,
+        longitude,
+        gemini_api_key: form.gemini_api_key || undefined,
       });
       setMessage("Saved. Inverter now uses the new credentials.");
-      setForm((previous) => ({ ...previous!, password: "" }));
+      setForm((previous) => ({
+        ...previous!,
+        password: "",
+        gemini_api_key: "",
+        has_gemini_api_key: settings.has_gemini_api_key,
+      }));
     } catch (caught) {
       setError(`Could not save: ${String(caught)}`);
     } finally {
@@ -110,6 +137,23 @@ export function SettingsPage() {
                 ))}
               </Select>
             </div>
+            <div className="space-y-1.5">
+              <Label>Location (lat, long)</Label>
+              <Input
+                placeholder="Enter latitude and longitude separated by a comma"
+                value={form.location}
+                onChange={(event) => set({ location: event.target.value })}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Gemini API key</Label>
+              <Input
+                type="password"
+                placeholder={form.has_gemini_api_key ? "Saved — leave blank to keep" : "For the automation agent"}
+                value={form.gemini_api_key}
+                onChange={(event) => set({ gemini_api_key: event.target.value })}
+              />
+            </div>
           </div>
           <Button onClick={save} disabled={saving}>
             <Save /> {saving ? "Saving…" : "Save"}
@@ -118,6 +162,8 @@ export function SettingsPage() {
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
         </CardContent>
       </Card>
+
+      <AutomationSettingsCard />
     </div>
   );
 }
