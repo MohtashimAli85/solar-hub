@@ -1,0 +1,17 @@
+{
+  "name": "solar-hub-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "decide": "node --env-file=.env decide.js",
+    "verify": "node --env-file=.env verify.js",
+    "loop": "node --env-file=.env loop.js",
+    "sun": "node --env-file=.env sun.js",
+    "morning": "node --env-file=.env morning.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "suncalc": "^1.9.0"
+  }
+}
