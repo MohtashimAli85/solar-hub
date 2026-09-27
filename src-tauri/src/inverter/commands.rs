@@ -4,6 +4,7 @@ use tauri::{AppHandle, State};
 use super::client::SolarCredentials;
 use super::types::{DeviceDetails, InverterSettings, InverterSnapshot};
 use super::InverterState;
+use crate::battery::BatteryState;
 use crate::events;
 use crate::storage::{
     clear_gemini_api_key, clear_solar_password, get_gemini_api_key, get_solar_password,
@@ -13,13 +14,20 @@ use crate::storage::{
 #[tauri::command]
 pub async fn get_inverter_snapshot(
     state: State<'_, InverterState>,
+    battery: State<'_, BatteryState>,
     app: AppHandle,
 ) -> Result<InverterSnapshot, String> {
-    let snapshot = state
+    let mut snapshot = state
         .solar_client()
         .read_inverter_snapshot(None)
         .await
         .map_err(|error| error.to_string())?;
+    let bms = if battery.connection_status().await.connected {
+        battery.latest_snapshot().await
+    } else {
+        None
+    };
+    snapshot.grid = Some(snapshot.grid_status(bms.as_ref().map(|b| b.current), bms.as_ref().map(|b| b.voltage)));
     events::emit(&app, events::INVERTER_SNAPSHOT, &snapshot);
     Ok(snapshot)
 }

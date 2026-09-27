@@ -38,6 +38,89 @@ pub struct DeviceDetails {
     pub nox_emission_reduction: Option<f64>,
 }
 
+pub const SOLAR_OUTPUT_MODE: u32 = 0;
+const SOLAR_MODE_DISCHARGE_LIMIT_A: f64 = 1.0;
+const MAINS_PRESENT_VOLTS: f64 = 100.0;
+const LOAD_OVER_PV_MARGIN_W: f64 = 100.0;
+/// Share of the house's shortfall (load minus solar) the battery must carry
+/// before a Solar-mode draw counts as an outage; a small trickle while the
+/// grid is up is just the inverter's own behaviour.
+const OUTAGE_BATTERY_SHARE: f64 = 0.6;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GridBasis {
+    BatteryDrawInSolarMode,
+    AcInput,
+    LoadWithoutBattery,
+    Unknown,
+}
+
+impl GridBasis {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GridBasis::BatteryDrawInSolarMode => "battery_draw_in_solar_mode",
+            GridBasis::AcInput => "ac_input",
+            GridBasis::LoadWithoutBattery => "load_without_battery",
+            GridBasis::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GridStatus {
+    pub on: Option<bool>,
+    pub basis: GridBasis,
+    pub voltage: Option<f64>,
+    pub power_w: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GridInputs {
+    pub mode: Option<u32>,
+    pub battery_a: Option<f64>,
+    pub battery_v: Option<f64>,
+    pub ac_input_v: Option<f64>,
+    pub load_w: Option<f64>,
+    pub pv_w: Option<f64>,
+}
+
+/// Whether the battery is carrying the house: discharging over the limit and,
+/// when load and voltage are known, covering most of what solar doesn't.
+fn battery_carries_house(inputs: &GridInputs) -> bool {
+    let Some(current) = inputs.battery_a.filter(|current| *current < -SOLAR_MODE_DISCHARGE_LIMIT_A) else {
+        return false;
+    };
+    match (inputs.load_w, inputs.battery_v.filter(|v| *v > 0.0)) {
+        (Some(load), Some(volts)) => {
+            let shortfall = (load - inputs.pv_w.unwrap_or(0.0)).max(0.0);
+            -current * volts >= shortfall * OUTAGE_BATTERY_SHARE
+        }
+        _ => true,
+    }
+}
+
+/// In Solar output mode (solar, then grid, then battery) the battery only
+/// carries the house once both solar and mains are gone, so that outranks a
+/// possibly stale AC reading.
+pub fn resolve_grid(inputs: GridInputs) -> (Option<bool>, GridBasis) {
+    let solar_mode = inputs.mode == Some(SOLAR_OUTPUT_MODE);
+    if solar_mode && battery_carries_house(&inputs) {
+        return (Some(false), GridBasis::BatteryDrawInSolarMode);
+    }
+    if let Some(voltage) = inputs.ac_input_v {
+        return (Some(voltage >= MAINS_PRESENT_VOLTS), GridBasis::AcInput);
+    }
+    if solar_mode {
+        if let (Some(current), Some(load)) = (inputs.battery_a, inputs.load_w) {
+            if current >= -SOLAR_MODE_DISCHARGE_LIMIT_A && load > inputs.pv_w.unwrap_or(0.0) + LOAD_OVER_PV_MARGIN_W {
+                return (Some(true), GridBasis::LoadWithoutBattery);
+            }
+        }
+    }
+    (None, GridBasis::Unknown)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InverterSnapshot {
     pub device_id: String,
@@ -48,6 +131,8 @@ pub struct InverterSnapshot {
     pub pv_panel_flow: Option<Value>,
     pub grid_flow: Option<Value>,
     pub load_flow: Option<Value>,
+    pub energy_flow_stale: bool,
+    pub grid: Option<GridStatus>,
 }
 
 impl InverterSnapshot {
@@ -115,10 +200,26 @@ impl InverterSnapshot {
             .or_else(|| self.field(&["outputActivePower", "acOutputActivePower"]))
     }
 
-    /// Whether the grid input is up, assuming mains is present once the AC
-    /// input voltage crosses 100 V.
-    pub fn grid_on(&self) -> Option<bool> {
-        self.field(&["acInputVoltage"]).map(|voltage| voltage >= 100.0)
+    pub fn output_mode(&self) -> Option<u32> {
+        self.settings.as_ref().and_then(|settings| settings.output_source_priority_value)
+    }
+
+    pub fn grid_status(&self, bms_current_a: Option<f64>, bms_voltage: Option<f64>) -> GridStatus {
+        let ac_input_v = self.field(&["acInputVoltage"]);
+        let (on, basis) = resolve_grid(GridInputs {
+            mode: self.output_mode(),
+            battery_a: bms_current_a,
+            battery_v: bms_voltage.or_else(|| self.field(&["batteryVoltage", "battery_voltage"])),
+            ac_input_v,
+            load_w: self.load_watts(),
+            pv_w: self.pv_watts(),
+        });
+        GridStatus {
+            on,
+            basis,
+            voltage: ac_input_v,
+            power_w: Self::flow_watts(&self.grid_flow).or_else(|| self.field(&["gridPower"])),
+        }
     }
 }
 
@@ -189,6 +290,8 @@ mod tests {
             pv_panel_flow: pv_w.map(|watts| flow(watts, "W")),
             grid_flow: None,
             load_flow: load_w.map(|watts| flow(watts, "W")),
+            energy_flow_stale: false,
+            grid: None,
         }
     }
 
@@ -205,7 +308,7 @@ mod tests {
         let snapshot = snapshot_with_flows(80.0, 0.0, 100.0, 0, Some(1500.0), Some(200.0), Some(230.0));
         assert_eq!(snapshot.pv_watts(), Some(1500.0));
         assert_eq!(snapshot.load_watts(), Some(200.0));
-        assert_eq!(snapshot.grid_on(), Some(true));
+        assert_eq!(snapshot.grid_status(None, None).on, Some(true));
 
         let kilowatt = InverterSnapshot {
             pv_panel_flow: Some(flow(1.5, "kW")),
@@ -216,8 +319,67 @@ mod tests {
 
     #[test]
     fn grid_on_flags_mains_below_100_volts() {
-        assert_eq!(snapshot_with_flows(80.0, 0.0, 100.0, 0, None, None, Some(0.0)).grid_on(), Some(false));
-        assert_eq!(snapshot_with_flows(80.0, 0.0, 100.0, 0, None, None, Some(231.0)).grid_on(), Some(true));
-        assert_eq!(snapshot_with(80.0, 0.0, 100.0, 0).grid_on(), None);
+        let off = snapshot_with_flows(80.0, 0.0, 100.0, 1, None, None, Some(0.0)).grid_status(None, None);
+        assert_eq!((off.on, off.basis), (Some(false), GridBasis::AcInput));
+        let on = snapshot_with_flows(80.0, 0.0, 100.0, 1, None, None, Some(231.0)).grid_status(None, None);
+        assert_eq!((on.on, on.voltage), (Some(true), Some(231.0)));
+        assert_eq!(snapshot_with(80.0, 0.0, 100.0, 1).grid_status(None, None).on, None);
+    }
+
+    fn inputs(mode: u32, battery_a: Option<f64>, ac: Option<f64>, load: Option<f64>, pv: Option<f64>) -> GridInputs {
+        GridInputs {
+            mode: Some(mode),
+            battery_a,
+            battery_v: Some(26.0),
+            ac_input_v: ac,
+            load_w: load,
+            pv_w: pv,
+        }
+    }
+
+    #[test]
+    fn battery_draw_in_solar_mode_means_grid_off_even_with_stale_voltage() {
+        assert_eq!(
+            resolve_grid(inputs(0, Some(-16.0), Some(230.0), Some(400.0), Some(0.0))),
+            (Some(false), GridBasis::BatteryDrawInSolarMode)
+        );
+    }
+
+    #[test]
+    fn a_trickle_from_the_battery_while_the_grid_carries_the_house_is_not_an_outage() {
+        assert_eq!(
+            resolve_grid(inputs(0, Some(-1.2), Some(230.0), Some(101.0), Some(14.0))),
+            (Some(true), GridBasis::AcInput)
+        );
+    }
+
+    #[test]
+    fn without_load_data_the_plain_discharge_rule_applies() {
+        let bms_only = GridInputs { mode: Some(0), battery_a: Some(-3.0), ..GridInputs::default() };
+        assert_eq!(resolve_grid(bms_only), (Some(false), GridBasis::BatteryDrawInSolarMode));
+    }
+
+    #[test]
+    fn small_draw_in_solar_mode_is_not_an_outage() {
+        assert_eq!(resolve_grid(inputs(0, Some(-0.5), Some(230.0), None, None)), (Some(true), GridBasis::AcInput));
+    }
+
+    #[test]
+    fn battery_draw_in_sbg_mode_is_expected_not_an_outage() {
+        assert_eq!(resolve_grid(inputs(1, Some(-12.0), None, Some(600.0), Some(0.0))), (None, GridBasis::Unknown));
+    }
+
+    #[test]
+    fn load_covered_without_battery_in_solar_mode_means_grid_on() {
+        assert_eq!(
+            resolve_grid(inputs(0, Some(0.2), None, Some(500.0), Some(100.0))),
+            (Some(true), GridBasis::LoadWithoutBattery)
+        );
+        assert_eq!(resolve_grid(inputs(0, Some(0.2), None, Some(150.0), Some(100.0))), (None, GridBasis::Unknown));
+    }
+
+    #[test]
+    fn nothing_known_means_unknown() {
+        assert_eq!(resolve_grid(GridInputs::default()), (None, GridBasis::Unknown));
     }
 }

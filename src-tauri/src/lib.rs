@@ -70,7 +70,13 @@ pub fn run() {
             let automation_config = load_automation_config(&handle);
             let notifier = notifications::Notifier::new(handle.clone());
             notifier.set_enabled(automation_config.notifications_enabled);
-            let automation = AutomationState::new(automation_config);
+            let records_root = handle
+                .path()
+                .document_dir()
+                .unwrap_or_else(|_| std::env::temp_dir())
+                .join("Solar Hub");
+            let automation =
+                AutomationState::new(automation_config, automation::history::HistoryStore::new(records_root));
 
             app.manage(inverter.clone());
             app.manage(battery.clone());
@@ -115,6 +121,9 @@ pub fn run() {
             automation::commands::get_automation_config,
             automation::commands::update_automation_config,
             automation::commands::force_automation_check,
+            automation::commands::get_automation_insights,
+            automation::commands::get_automation_decisions,
+            automation::commands::open_records_folder,
             automation::commands::send_test_notification,
         ])
         .run(tauri::generate_context!())

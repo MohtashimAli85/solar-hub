@@ -42,22 +42,6 @@ pub struct SunInfo {
     pub altitude_deg: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Decision {
-    pub mode: String,
-    #[allow(dead_code)]
-    pub confidence: f64,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Verification {
-    pub verified: bool,
-    #[allow(dead_code)]
-    pub confidence: f64,
-    pub reason: String,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct SunInput {
     pub latitude: f64,
@@ -65,43 +49,150 @@ pub struct SunInput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DecideInput {
-    pub soc: Option<f64>,
+pub struct PreviousPlan {
+    pub reserve_soc: f64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HourLoadRow {
+    pub hour: String,
+    pub load_w: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SocRow {
+    pub time: String,
+    pub soc: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OutageRow {
+    pub when: String,
+    pub minutes: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentDayRow {
+    pub date: String,
+    pub radiation_kwh_m2: Option<f64>,
+    pub max_soc: Option<f64>,
+    pub full_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NextDayRow {
+    pub date: String,
+    pub radiation_kwh_m2: Option<f64>,
+    pub sunshine_h: Option<f64>,
+    pub cloud_pct: Option<f64>,
+    pub rain_prob_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WeatherBrief {
+    pub next_day: Option<NextDayRow>,
+    pub recent_avg_radiation_kwh_m2: Option<f64>,
+    pub recent_days: Vec<RecentDayRow>,
+    pub tonight_min_temp_c: Option<f64>,
+    pub recent_nights_min_temp_c: Option<f64>,
+    pub expected_pv_kwh_next_day: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SmartLoadBrief {
+    pub season: String,
+    pub currently_on: Option<bool>,
+    pub choose_on_time: bool,
+    pub earliest: String,
+    pub latest: String,
+}
+
+/// Everything is pre-computed here so the model reasons instead of doing
+/// arithmetic.
+#[derive(Debug, Clone, Serialize)]
+pub struct NightInput {
+    pub now: String,
+    pub month: String,
+    pub latitude: f64,
+    pub on_battery: bool,
+    pub on_battery_since: Option<String>,
+    pub previous_plan: Option<PreviousPlan>,
+    pub soc: f64,
+    pub rated_capacity_ah: f64,
+    pub battery_v: Option<f64>,
+    pub floor_soc: f64,
+    pub load_w: Option<f64>,
+    pub pv_w: Option<f64>,
     pub discharge_a: f64,
-    pub usable_capacity_ah: f64,
-    pub pv_w: Option<f64>,
-    pub load_w: Option<f64>,
-    pub mode: Option<String>,
-    pub hour: u32,
-    pub required_hours: f64,
+    pub discharge_measured: bool,
+    pub sunrise: String,
+    pub hours_until_sunrise: f64,
+    pub history_nights: u32,
+    pub typical_load_now_w: Option<f64>,
+    pub typical_hourly_load: Vec<HourLoadRow>,
+    pub quiet_by: Option<String>,
+    pub trajectory: Vec<SocRow>,
+    pub trajectory_basis: String,
+    pub soc_per_backup_hour: Option<f64>,
+    pub outages: Vec<OutageRow>,
+    pub weather: Option<WeatherBrief>,
+    pub smart_load: SmartLoadBrief,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NightPlan {
+    pub mode: String,
+    pub reserve_soc: f64,
+    pub recheck_minutes: f64,
+    pub confidence: f64,
+    pub reason: String,
+    #[serde(default)]
+    pub smart_load_on_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct VerifyInput {
-    pub original_reason: String,
-    pub soc: Option<f64>,
-    pub usable_capacity_ah: f64,
-    pub verified_discharge_a: f64,
-    pub required_hours: f64,
+pub struct HourOutlookRow {
+    pub time: String,
+    pub cloud_pct: Option<f64>,
+    pub radiation_w_m2: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct MorningInput {
-    pub soc: Option<f64>,
-    pub charge_a: Option<f64>,
-    pub charge_threshold_a: f64,
+pub struct DayInput {
+    pub now: String,
+    pub soc: f64,
+    pub rated_capacity_ah: f64,
+    pub ah_to_full: f64,
+    pub charge_a: f64,
+    pub max_charge_a: Option<f64>,
     pub pv_w: Option<f64>,
-    pub expected_pv_w: Option<f64>,
     pub load_w: Option<f64>,
-    pub mode: Option<String>,
-    pub minutes_since_sunrise: f64,
+    pub typical_load_now_w: Option<f64>,
+    pub current_mode: String,
+    pub battery_draining: bool,
+    pub sunset: String,
+    pub hours_of_sun_left: f64,
+    pub projected_soc_at_sunset: f64,
+    pub projected_full_at: Option<String>,
+    pub projection_method: String,
+    pub next_hours: Vec<HourOutlookRow>,
+    pub recent_days: Vec<RecentDayRow>,
+    pub forecast_available: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DayDecision {
+    pub mode: String,
+    pub recheck_minutes: f64,
+    pub confidence: f64,
+    pub reason: String,
 }
 
 pub trait AgentRunner: Send + Sync {
     fn run_sun(&self, input: SunInput) -> BoxFuture<'_, Result<SunInfo, AgentError>>;
-    fn run_decide(&self, input: DecideInput) -> BoxFuture<'_, Result<Decision, AgentError>>;
-    fn run_verify(&self, input: VerifyInput) -> BoxFuture<'_, Result<Verification, AgentError>>;
-    fn run_morning(&self, input: MorningInput) -> BoxFuture<'_, Result<Decision, AgentError>>;
+    fn run_night(&self, input: NightInput) -> BoxFuture<'_, Result<NightPlan, AgentError>>;
+    fn run_day(&self, input: DayInput) -> BoxFuture<'_, Result<DayDecision, AgentError>>;
 }
 
 pub struct NodeAgent;
@@ -123,24 +214,17 @@ impl AgentRunner for NodeAgent {
         Box::pin(async move { run_script("sun.js", &input, None).await })
     }
 
-    fn run_decide(&self, input: DecideInput) -> BoxFuture<'_, Result<Decision, AgentError>> {
+    fn run_night(&self, input: NightInput) -> BoxFuture<'_, Result<NightPlan, AgentError>> {
         Box::pin(async move {
             let key = gemini_key()?;
-            run_script("decide.js", &input, Some(&key)).await
+            run_script("night.js", &input, Some(&key)).await
         })
     }
 
-    fn run_verify(&self, input: VerifyInput) -> BoxFuture<'_, Result<Verification, AgentError>> {
+    fn run_day(&self, input: DayInput) -> BoxFuture<'_, Result<DayDecision, AgentError>> {
         Box::pin(async move {
             let key = gemini_key()?;
-            run_script("verify.js", &input, Some(&key)).await
-        })
-    }
-
-    fn run_morning(&self, input: MorningInput) -> BoxFuture<'_, Result<Decision, AgentError>> {
-        Box::pin(async move {
-            let key = gemini_key()?;
-            run_script("morning.js", &input, Some(&key)).await
+            run_script("day.js", &input, Some(&key)).await
         })
     }
 }
@@ -166,7 +250,7 @@ where
         match run_once(script, &payload, gemini_key).await {
             Ok(bytes) => return Ok(serde_json::from_slice(&bytes)?),
             Err(error) => {
-                tracing::debug!("{script} attempt failed: {error}");
+                tracing::warn!("{script} attempt failed: {error}");
                 last_error = error;
             }
         }
@@ -183,7 +267,8 @@ async fn run_once(script: &str, payload: &[u8], gemini_key: Option<&str>) -> Res
             .arg(script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         if let Some(key) = gemini_key {
             command.env("GEMINI_API_KEY", key);
         }
@@ -215,6 +300,9 @@ async fn run_once(script: &str, payload: &[u8], gemini_key: Option<&str>) -> Res
             )));
         }
         return Ok(output.stdout);
+    }
+    if matches!(last_error, AgentError::Io(ref error) if error.kind() == std::io::ErrorKind::NotFound) {
+        return Err(AgentError::NodeNotFound);
     }
     Err(last_error)
 }

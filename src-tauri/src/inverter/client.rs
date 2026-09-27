@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -16,6 +16,23 @@ use super::types::{
 use super::InverterError;
 
 const API_BASE: &str = "https://solar.siseli.com";
+const ENERGY_FLOW_MAX_AGE: Duration = Duration::from_secs(120);
+
+/// Picks the energy-flow payload to ship: the fresh one, else a cached copy
+/// young enough to still describe the house (flagged stale).
+fn choose_energy_flow(
+    fresh: Option<EnergyFlowData>,
+    cached: Option<&(Instant, EnergyFlowData)>,
+    now: Instant,
+) -> (Option<EnergyFlowData>, bool) {
+    if fresh.is_some() {
+        return (fresh, false);
+    }
+    match cached {
+        Some((at, data)) if now.saturating_duration_since(*at) <= ENERGY_FLOW_MAX_AGE => (Some(data.clone()), true),
+        _ => (None, false),
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct SolarCredentials {
@@ -41,6 +58,7 @@ pub struct SolarClient {
     http: reqwest::Client,
     token: Arc<Mutex<Option<String>>>,
     credentials: Arc<Mutex<SolarCredentials>>,
+    energy_flow_cache: Arc<Mutex<Option<(Instant, EnergyFlowData)>>>,
 }
 
 impl SolarClient {
@@ -52,6 +70,7 @@ impl SolarClient {
                 .expect("reqwest client build"),
             token: Arc::new(Mutex::new(None)),
             credentials: Arc::new(Mutex::new(credentials)),
+            energy_flow_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -249,18 +268,19 @@ impl SolarClient {
             .cloned()
             .unwrap_or_else(Vec::new);
         let settings = self.read_inverter_settings(&device_id).await.ok();
+        let (energy_flow, energy_flow_stale) = self.energy_flow_with_fallback(&device_id).await;
         let mut pv_panel_flow = None;
         let mut grid_flow = None;
         let mut load_flow = None;
 
-        if let Ok(energy_flow) = self.read_energy_flow_fields(&device_id).await {
+        if let Some(energy_flow) = energy_flow {
             fields.extend(energy_flow.fields);
             pv_panel_flow = energy_flow.pv_panel_flow;
             grid_flow = energy_flow.grid_flow;
             load_flow = energy_flow.load_flow;
         }
 
-        Ok(InverterSnapshot {
+        let mut snapshot = InverterSnapshot {
             device_id,
             fields,
             groups,
@@ -269,7 +289,29 @@ impl SolarClient {
             pv_panel_flow,
             grid_flow,
             load_flow,
-        })
+            energy_flow_stale,
+            grid: None,
+        };
+        snapshot.grid = Some(snapshot.grid_status(None, None));
+        Ok(snapshot)
+    }
+
+    async fn energy_flow_with_fallback(&self, device_id: &str) -> (Option<EnergyFlowData>, bool) {
+        let mut fresh = None;
+        for attempt in 1..=2 {
+            match self.read_energy_flow_fields(device_id).await {
+                Ok(data) => {
+                    fresh = Some(data);
+                    break;
+                }
+                Err(error) => tracing::warn!("energy-flow request failed (attempt {attempt}/2): {error}"),
+            }
+        }
+        let mut cache = self.energy_flow_cache.lock().await;
+        if let Some(data) = &fresh {
+            *cache = Some((Instant::now(), data.clone()));
+        }
+        choose_energy_flow(fresh, cache.as_ref(), Instant::now())
     }
 
     async fn read_energy_flow_fields(
@@ -719,6 +761,41 @@ fn urlencode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn flow_data() -> EnergyFlowData {
+        EnergyFlowData {
+            fields: serde_json::Map::new(),
+            pv_panel_flow: None,
+            grid_flow: Some(json!({"value": 420})),
+            load_flow: None,
+        }
+    }
+
+    #[test]
+    fn fresh_energy_flow_wins() {
+        let now = Instant::now();
+        let (data, stale) = choose_energy_flow(Some(flow_data()), None, now);
+        assert!(data.is_some());
+        assert!(!stale);
+    }
+
+    #[test]
+    fn recent_cache_fills_a_failed_request_as_stale() {
+        let now = Instant::now();
+        let cached = (now - Duration::from_secs(60), flow_data());
+        let (data, stale) = choose_energy_flow(None, Some(&cached), now);
+        assert!(data.is_some());
+        assert!(stale);
+    }
+
+    #[test]
+    fn old_cache_is_not_reused() {
+        let now = Instant::now();
+        let cached = (now - Duration::from_secs(300), flow_data());
+        let (data, stale) = choose_energy_flow(None, Some(&cached), now);
+        assert!(data.is_none());
+        assert!(!stale);
+    }
 
     #[test]
     fn solar_time_formats_with_offset() {
