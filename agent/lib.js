@@ -15,24 +15,6 @@ export function sunInfo(lat, lon, date) {
   };
 }
 
-// Clear-sky estimate: PV output scales with sin(altitude). `null` when the
-// array size isn't configured, since there is nothing to scale.
-export function expectedPvWatts(pvArrayWatts, altitudeDeg) {
-  if (!pvArrayWatts) return null;
-  if (altitudeDeg <= 0) return 0;
-  return pvArrayWatts * Math.sin((altitudeDeg * Math.PI) / 180);
-}
-
-export function projectRuntimeHours(usableCapacityAh, dischargeA) {
-  if (dischargeA > 0) return Math.max(usableCapacityAh / dischargeA, 0);
-  if (usableCapacityAh > 0) return null; // not discharging: runtime is indefinite
-  return 0;
-}
-
-export function runtimeText(hours) {
-  return hours === null ? "indefinite (not discharging)" : `${hours.toFixed(1)}h`;
-}
-
 async function readStdin() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
