@@ -1,4 +1,3 @@
-import { AutomationSettingsCard } from "@/components/automation/AutomationSettingsCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
@@ -163,7 +162,6 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      <AutomationSettingsCard />
     </div>
   );
 }

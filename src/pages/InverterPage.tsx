@@ -2,7 +2,6 @@ import { AlarmBanner } from "@/components/inverter/AlarmBanner";
 import { ChargerPrioritySelector } from "@/components/inverter/ChargerPrioritySelector";
 import { DeviceSummaryCard } from "@/components/inverter/DeviceSummaryCard";
 import { InverterHero } from "@/components/inverter/InverterHero";
-import { InverterMetrics } from "@/components/inverter/InverterMetrics";
 import { OutputSourcePanel } from "@/components/inverter/OutputSourcePanel";
 import { SettingsControls } from "@/components/inverter/SettingsControls";
 import { Button } from "@/components/ui/button";
@@ -36,7 +35,7 @@ export function InverterPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Inverter</h1>
         <p className="text-sm text-muted-foreground">
-          Flows and advanced settings — Solar of Things cloud telemetry.
+          Live power flows, output source and the inverter's advanced settings.
         </p>
       </div>
 
@@ -62,23 +61,28 @@ export function InverterPage() {
             snapshot={snapshot}
             battery={battery.snapshot}
             batteryDeviceName={battery.connection?.device_name ?? null}
-            onRefresh={snapshotHook.refresh}
-            refreshing={snapshotHook.isFetching}
           />
 
-          <InverterMetrics snapshot={snapshot} />
+          <div className="grid items-start gap-4 lg:grid-cols-2">
+            <OutputSourcePanel
+              settings={settings}
+              pending={settingsHook.setPriority.isPending}
+              smartLoadPending={settingsHook.setSmartLoad.isPending}
+              onSet={(mode) => settingsHook.setPriority.mutate(mode)}
+              onSetSmartLoad={(enabled) => settingsHook.setSmartLoad.mutate(enabled)}
+              onRefresh={settingsHook.refresh}
+              refreshing={settingsHook.isFetching}
+            />
+            <DeviceSummaryCard
+              details={deviceDetailsHook.deviceDetails}
+              loading={deviceDetailsHook.isLoading}
+              error={deviceDetailsHook.error}
+              onRefresh={deviceDetailsHook.refresh}
+              refreshing={deviceDetailsHook.isFetching}
+            />
+          </div>
 
-          <OutputSourcePanel
-            settings={settings}
-            pending={settingsHook.setPriority.isPending}
-            smartLoadPending={settingsHook.setSmartLoad.isPending}
-            onSet={(mode) => settingsHook.setPriority.mutate(mode)}
-            onSetSmartLoad={(enabled) => settingsHook.setSmartLoad.mutate(enabled)}
-            onRefresh={settingsHook.refresh}
-            refreshing={settingsHook.isFetching}
-          />
-
-          <details className="group rounded-xl border border-border bg-card" open>
+          <details className="group rounded-xl border border-border bg-card">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-2 p-5 [&::-webkit-details-marker]:hidden">
               <div className="flex flex-col space-y-1">
                 <h3 className="text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -135,14 +139,6 @@ export function InverterPage() {
             </div>
           </details>
 
-          <DeviceSummaryCard
-            details={deviceDetailsHook.deviceDetails}
-            loading={deviceDetailsHook.isLoading}
-            error={deviceDetailsHook.error}
-            onRefresh={deviceDetailsHook.refresh}
-            refreshing={deviceDetailsHook.isFetching}
-          />
-
           <details className="group rounded-lg border border-border bg-card shadow-sm">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-2 p-5 [&::-webkit-details-marker]:hidden">
               <div className="flex flex-col space-y-1">
@@ -150,8 +146,7 @@ export function InverterPage() {
                   Raw fields
                 </h3>
                 <p className="text-sm text-muted-foreground">
-                  Parity with solar-cloud.html — every field as returned by the
-                  API.
+                  Every field exactly as the inverter cloud returns it.
                 </p>
               </div>
               <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />

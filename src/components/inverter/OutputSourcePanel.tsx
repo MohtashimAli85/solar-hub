@@ -4,6 +4,12 @@ import type { InverterSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Loader2 } from "lucide-react";
 
+const MODE_HINTS: Record<string, string> = {
+  "0": "Solar: panels first, then grid. The battery is only used when both are gone.",
+  "1": "SBG: panels first, then battery, then grid.",
+  "2": "Utility: grid first, then battery. The panels don't power the house.",
+};
+
 interface OutputSourcePanelProps {
   settings: InverterSettings | null;
   pending: boolean;
@@ -48,7 +54,7 @@ export function OutputSourcePanel({
           </span>
         ) : (
           <span className="text-xs tabular-nums text-muted-foreground">
-            {settings ? settings.output_source_priority : "–"}
+            charger <span className="text-foreground">{settings?.charger_source_priority ?? "–"}</span>
           </span>
         )}
       </div>
@@ -80,7 +86,7 @@ export function OutputSourcePanel({
         })}
       </div>
       <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
-        Manual changes pause automation until the next window.
+        {MODE_HINTS[String(currentValue ?? "")] ?? "Pick where the house draws power from."} Changing it by hand pauses automation until the next window.
       </p>
 
       <div

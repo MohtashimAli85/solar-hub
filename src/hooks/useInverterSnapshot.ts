@@ -32,6 +32,7 @@ export function useInverterSnapshot() {
 
   return {
     snapshot: snapshotQuery.data,
+    updatedAt: snapshotQuery.dataUpdatedAt || null,
     isLoading: snapshotQuery.isLoading,
     isFetching: snapshotQuery.isFetching,
     error: snapshotQuery.error ? String(snapshotQuery.error) : null,

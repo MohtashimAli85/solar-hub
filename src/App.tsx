@@ -1,20 +1,27 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Battery, Gauge, Moon, Settings, Sun } from "lucide-react";
-import { useState } from "react";
+import { Battery, BrainCircuit, Gauge, Moon, Settings, Sun } from "lucide-react";
+import { lazy, Suspense, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/useTheme";
 import { Button } from "@/components/ui/button";
-import { BatteryPage } from "@/pages/BatteryPage";
 import { DashboardPage } from "@/pages/DashboardPage";
-import { InverterPage } from "@/pages/InverterPage";
-import { SettingsPage } from "@/pages/SettingsPage";
 
-type Tab = "dashboard" | "battery" | "inverter" | "settings";
+const AutomationPage = lazy(() => import("@/pages/AutomationPage").then((m) => ({ default: m.AutomationPage })));
+const BatteryPage = lazy(() => import("@/pages/BatteryPage").then((m) => ({ default: m.BatteryPage })));
+const InverterPage = lazy(() => import("@/pages/InverterPage").then((m) => ({ default: m.InverterPage })));
+const SettingsPage = lazy(() => import("@/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
+
+function PageFallback() {
+  return <div className="h-40 animate-pulse rounded-xl border border-border bg-card motion-reduce:animate-none" />;
+}
+
+type Tab = "dashboard" | "battery" | "inverter" | "automation" | "settings";
 
 const TABS: { id: Tab; label: string; icon: typeof Gauge }[] = [
   { id: "dashboard", label: "Dashboard", icon: Gauge },
   { id: "battery", label: "Battery", icon: Battery },
   { id: "inverter", label: "Inverter", icon: Sun },
+  { id: "automation", label: "Automation", icon: BrainCircuit },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -45,6 +52,7 @@ function Shell() {
             <button
               key={id}
               onClick={() => setTab(id)}
+              aria-current={tab === id ? "page" : undefined}
               className={cn(
                 "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                 tab === id
@@ -71,10 +79,13 @@ function Shell() {
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col overflow-y-auto p-6">
-        {tab === "dashboard" ? <DashboardPage /> : null}
-        {tab === "battery" ? <BatteryPage /> : null}
-        {tab === "inverter" ? <InverterPage /> : null}
-        {tab === "settings" ? <SettingsPage /> : null}
+        <Suspense fallback={<PageFallback />}>
+          {tab === "dashboard" ? <DashboardPage onOpenAutomation={() => setTab("automation")} /> : null}
+          {tab === "battery" ? <BatteryPage /> : null}
+          {tab === "inverter" ? <InverterPage /> : null}
+          {tab === "automation" ? <AutomationPage onOpenSettings={() => setTab("settings")} /> : null}
+          {tab === "settings" ? <SettingsPage /> : null}
+        </Suspense>
       </main>
     </div>
   );

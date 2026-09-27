@@ -60,6 +60,17 @@ export interface InverterSnapshot {
   pv_panel_flow?: unknown;
   grid_flow?: unknown;
   load_flow?: unknown;
+  energy_flow_stale?: boolean;
+  grid?: GridStatus | null;
+}
+
+export type GridBasis = "battery_draw_in_solar_mode" | "ac_input" | "load_without_battery" | "unknown";
+
+export interface GridStatus {
+  on: boolean | null;
+  basis: GridBasis;
+  voltage: number | null;
+  power_w: number | null;
 }
 
 export interface AutomationConfig {
@@ -69,9 +80,9 @@ export interface AutomationConfig {
   min_soc_percent: number;
   capacity_ah: number;
   sunrise_buffer_hours: number;
-  morning_window_hours: number;
-  morning_charge_threshold_a: number;
+  night_start_hour: number;
   pv_array_watts: number;
+  oven_boost_amps: number;
   notifications_enabled: boolean;
 }
 
@@ -82,11 +93,12 @@ export interface AutomationLastEvent {
 
 export type AutomationPhase =
   | "idle"
+  | "day"
   | "night_deciding"
   | "night_verifying"
-  | "night_holding"
+  | "night_on_battery"
+  | "night_reserve"
   | "paused"
-  | "morning"
   | "blocked";
 
 export interface AutomationStatus {
@@ -94,11 +106,137 @@ export interface AutomationStatus {
   dry_run: boolean;
   phase: AutomationPhase;
   mode_name: string | null;
+  effective_mode: string | null;
   last_event: AutomationLastEvent | null;
   sunrise: string | null;
   sunset: string | null;
   blocked_reason: string | null;
   ai_reason: string | null;
+  reserve_soc: number | null;
+  next_check_at: string | null;
+  boost_until: string | null;
+  boosts_tonight: number;
+  history_nights: number;
+  history_dir: string;
+}
+
+/** Local wall-clock time without a zone, e.g. "2026-09-26T21:05:00". */
+export type LocalDateTime = string;
+
+export interface SocPoint {
+  at: LocalDateTime;
+  soc: number;
+}
+
+export interface HourLoad {
+  hour: number;
+  load_w: number;
+  nights: number;
+}
+
+export interface Outage {
+  start: LocalDateTime;
+  minutes: number;
+  ongoing: boolean;
+}
+
+export interface DayOutlook {
+  date: string;
+  radiation_kwh_m2: number | null;
+  sunshine_h: number | null;
+  cloud_pct: number | null;
+  rain_prob_pct: number | null;
+}
+
+export interface RecentDay {
+  date: string;
+  radiation_kwh_m2: number | null;
+  max_soc: number | null;
+  full_at: string | null;
+}
+
+export interface HourOutlook {
+  at: LocalDateTime;
+  cloud_pct: number | null;
+  radiation_w_m2: number | null;
+}
+
+export interface WeatherSummary {
+  next_day: DayOutlook | null;
+  recent_avg_radiation_kwh_m2: number | null;
+  recent_days: RecentDay[];
+  tonight_min_temp_c: number | null;
+  recent_nights_min_temp_c: number | null;
+  expected_pv_kwh_next_day: number | null;
+  hours_until_sunset: HourOutlook[];
+}
+
+export type ProjectionMethod = "pv_array" | "pv_headroom" | "charge_scaling" | "constant_charge" | "after_sunset";
+
+export interface DayProjection {
+  soc_now: number;
+  soc_at_sunset: number;
+  full_at: LocalDateTime | null;
+  hours_of_sun_left: number;
+  ah_to_full: number;
+  charge_a: number;
+  max_charge_a: number | null;
+  method: ProjectionMethod;
+}
+
+export interface AutomationInsights {
+  updated_at: LocalDateTime | null;
+  window: "day" | "night" | null;
+  sunrise: LocalDateTime | null;
+  sunset: LocalDateTime | null;
+  night_start: LocalDateTime | null;
+  next_sunrise: LocalDateTime | null;
+  soc: number | null;
+  simulated_soc: number | null;
+  floor_soc: number;
+  reserve_soc: number | null;
+  trajectory: SocPoint[];
+  trajectory_is_preview: boolean;
+  trajectory_basis: "history" | "current_load" | null;
+  actual_soc: SocPoint[];
+  reserve_eta: LocalDateTime | null;
+  backup_hours: number | null;
+  routine: {
+    nights_with_data: number;
+    typical: HourLoad[];
+    tonight: HourLoad[];
+    quiet_by: number | null;
+  };
+  weather: WeatherSummary | null;
+  outages: Outage[];
+  day: DayProjection | null;
+  records: {
+    dir: string;
+    samples_this_month: number;
+    decisions_this_month: number;
+  };
+  grid: GridStatus | null;
+  smart_load: SmartLoadInsight | null;
+}
+
+export interface SmartLoadInsight {
+  season: "summer" | "winter";
+  on: boolean | null;
+  planned_on_at: LocalDateTime | null;
+  night_on_at: LocalDateTime | null;
+  done: boolean;
+}
+
+export interface AutomationDecision {
+  at: LocalDateTime;
+  window: "day" | "night";
+  mode: string;
+  reserve_soc: number | null;
+  recheck_minutes: number | null;
+  confidence: number | null;
+  dry_run: boolean;
+  applied: boolean;
+  reason: string;
 }
 
 export interface AppSettings {

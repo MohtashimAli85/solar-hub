@@ -1,6 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { chargeState, parseFetStatus, parseProtectionFlags } from "@/lib/batteryStatus";
-import { fmtHours, fmtNumber, fmtSigned } from "@/lib/format";
+import { batteryEta, describeEta, etaDuration } from "@/lib/batteryEta";
+import { fmtNumber, fmtSigned } from "@/lib/format";
 import type { BatterySnapshot } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -9,6 +10,8 @@ export function PackHealthHero({ snapshot }: { snapshot: BatterySnapshot }) {
   const packWatts = snapshot.voltage * snapshot.current;
   const fet = parseFetStatus(snapshot.fet_status);
   const protection = parseProtectionFlags(snapshot.protection_status);
+  const eta = batteryEta(snapshot);
+  const etaText = describeEta(eta);
 
   return (
     <section className="rounded-xl border border-border bg-card p-5">
@@ -68,9 +71,9 @@ export function PackHealthHero({ snapshot }: { snapshot: BatterySnapshot }) {
             sub={`${fmtNumber(snapshot.voltage, 2)} V`}
           />
           <HealthStat
-            label="Time to 15%"
-            value={fmtHours(snapshot.time_to_15_hours)}
-            sub={snapshot.current > 0.05 ? "while charging or idle" : "at current demand"}
+            label={eta.kind === "charging" || eta.kind === "full" ? "Time to full" : "Time to 15%"}
+            value={etaDuration(eta)}
+            sub={etaText.detail ?? undefined}
           />
         </div>
       </div>

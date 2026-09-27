@@ -1,7 +1,10 @@
+import { useEffect, useState } from "react";
+import { GridStatusPill } from "@/components/inverter/GridStatusPill";
 import { PvBreakdown } from "@/components/inverter/PvBreakdown";
 import { Skeleton } from "@/components/ui/switch";
+import { batteryEta, describeEta } from "@/lib/batteryEta";
 import { chargeState } from "@/lib/batteryStatus";
-import { fieldPowerWatts, flowPowerWatts, fmtHours, fmtNumber, fmtSigned } from "@/lib/format";
+import { fieldPowerWatts, fieldValue, flowPowerWatts, fmtDuration, fmtNumber } from "@/lib/format";
 import type { BatterySnapshot, ConnectionStatus, InverterSnapshot } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -9,154 +12,194 @@ interface CommandHeroProps {
   battery: BatterySnapshot | null;
   connection: ConnectionStatus | null;
   inverter: InverterSnapshot | null;
+  inverterUpdatedAt: number | null;
   batteryLoading: boolean;
   inverterLoading: boolean;
 }
 
-export function formatPackWatts(watts: number | null): string {
-  if (watts == null || Number.isNaN(watts)) return "–";
+function fmtWatts(watts: number): string {
   const abs = Math.abs(watts);
-  if (abs >= 1000) {
-    const kw = watts / 1000;
-    const sign = kw > 0 ? "+" : kw < 0 ? "−" : "";
-    return `${sign}${Math.abs(kw).toFixed(2)} kW`;
-  }
-  return `${fmtSigned(Math.round(watts), 0)} W`.replace("-", "−");
+  return abs >= 1000 ? `${(abs / 1000).toFixed(2)} kW` : `${Math.round(abs)} W`;
 }
 
-export function CommandHero({ battery, connection, inverter, batteryLoading, inverterLoading }: CommandHeroProps) {
+function useNow(intervalMs: number) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+function ageText(updatedAt: number | null, now: number): string | null {
+  if (updatedAt == null) return null;
+  const seconds = Math.max(0, Math.round((now - updatedAt) / 1000));
+  if (seconds < 10) return "updated just now";
+  if (seconds < 60) return `updated ${seconds} s ago`;
+  return `updated ${fmtDuration(seconds / 60)} ago`;
+}
+
+export function CommandHero({ battery, connection, inverter, inverterUpdatedAt, batteryLoading, inverterLoading }: CommandHeroProps) {
+  const now = useNow(10_000);
   const fields = inverter?.fields ?? {};
   const bmsOk = connection?.connected ?? battery != null;
   const cloudOk = inverter != null;
-
-  const soc = battery?.soc ?? null;
-  const amps = battery?.current ?? null;
-  const packWatts = battery != null ? battery.voltage * battery.current : null;
-  const state = battery != null ? chargeState(battery.current) : null;
-
-  const rateColor =
-    state === "charging"
-      ? "text-amber-600 dark:text-amber-400"
-      : state === "discharging"
-        ? "text-sky-600 dark:text-sky-400"
-        : "text-muted-foreground";
+  const age = ageText(inverterUpdatedAt, now);
+  const stale = inverterUpdatedAt != null && now - inverterUpdatedAt > 120_000;
 
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-5 py-3 text-xs">
-        <span className="font-semibold uppercase tracking-wide text-muted-foreground">
-          Live plant
-        </span>
-        <span className="ml-auto flex items-center gap-3 text-muted-foreground">
-          <StatusDot ok={bmsOk} label={bmsOk ? `BMS ok${connection?.device_name ? ` · ${connection.device_name}` : ""}` : "BMS offline"} />
-          <StatusDot ok={cloudOk} label={cloudOk ? "cloud ok" : "cloud offline"} />
+        <span className="font-semibold uppercase tracking-wide text-muted-foreground">Live plant</span>
+        <span className="ml-auto flex flex-wrap items-center gap-3 text-muted-foreground">
+          <StatusDot ok={bmsOk} label={bmsOk ? `Battery${connection?.device_name ? ` · ${connection.device_name}` : ""}` : "Battery offline"} />
+          <StatusDot ok={cloudOk && !stale} warn={cloudOk && stale} label={cloudOk ? `Inverter cloud${age ? ` · ${age}` : ""}` : "Inverter cloud offline"} />
         </span>
       </div>
 
-      <div className="flex items-center gap-2 px-5 pt-4 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-        <span className="text-amber-600 dark:text-amber-400">PV</span>
-        <span aria-hidden className="h-px flex-1 bg-gradient-to-r from-amber-500/70 via-border to-primary/60" />
-        <span aria-hidden>→</span>
-        <span>Pack</span>
-        <span aria-hidden className="h-px flex-1 bg-border" />
-        <span aria-hidden>→</span>
-        <span>Load</span>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-3 sm:divide-x">
-        <div className="px-5 py-4">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Pack</p>
-          {batteryLoading ? (
-            <Skeleton className="mt-2 h-12 w-32" />
-          ) : soc == null ? (
-            <p className="mt-1 text-sm text-muted-foreground">Connect a BMS on the Battery page.</p>
-          ) : (
-            <>
-              <p className="text-5xl font-semibold tabular-nums leading-none">
-                {fmtNumber(soc, 0)}
-                <span className="ml-1 text-lg font-medium text-muted-foreground">%</span>
-              </p>
-              <div
-                className="mt-3 h-2.5 overflow-hidden rounded-full bg-muted"
-                role="progressbar"
-                aria-valuenow={Math.round(soc)}
-                aria-valuemin={0}
-                aria-valuemax={100}
-              >
-                <div
-                  className={cn("h-full rounded-full", soc < 20 ? "bg-destructive" : "bg-primary")}
-                  style={{ width: `${Math.max(0, Math.min(100, soc))}%` }}
-                />
-              </div>
-              <p className="mt-2 text-xs tabular-nums text-muted-foreground">
-                {battery ? `${fmtNumber(battery.voltage, 1)} V · ${fmtNumber(battery.remaining_capacity, 0)}/${fmtNumber(battery.rated_capacity, 0)} Ah` : "–"}
-              </p>
-            </>
-          )}
-        </div>
-
-        <div className="border-t px-5 py-4 sm:border-t-0">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Charge / discharge</p>
-          {batteryLoading ? (
-            <Skeleton className="mt-2 h-12 w-40" />
-          ) : packWatts == null ? (
-            <p className="mt-1 text-sm text-muted-foreground">No pack telemetry.</p>
-          ) : (
-            <>
-              <p className={cn("text-4xl font-semibold tabular-nums leading-tight sm:text-5xl sm:leading-none", rateColor)}>
-                {`${fmtSigned(amps, 1)} A`.replace("-", "−")}
-              </p>
-              <p className="mt-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                {state === "charging" ? <span className="text-amber-600 dark:text-amber-400">charging</span>
-                  : state === "discharging" ? <span className="text-sky-600 dark:text-sky-400">discharging</span>
-                    : "idle"}
-                {packWatts != null ? <span className="ml-2 normal-case tabular-nums">{formatPackWatts(packWatts)}</span> : null}
-              </p>
-              {battery?.time_to_15_hours != null ? (
-                <p className="mt-1 text-xs tabular-nums text-muted-foreground">
-                  {fmtHours(battery.time_to_15_hours)} to 15% ·{" "}
-                  {battery.current > 0.05 ? "while charging or idle" : "at current demand"}
-                </p>
-              ) : null}
-            </>
-          )}
-        </div>
-
-        <div className="border-t px-5 py-4 sm:border-t-0">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">PV making</p>
-          {inverterLoading ? (
-            <Skeleton className="mt-2 h-12 w-32" />
-          ) : inverter == null ? (
-            <p className="mt-1 text-sm text-muted-foreground">Add Solar credentials in Settings.</p>
-          ) : (
-            <PvWatts fields={fields} pvFlow={inverter?.pv_panel_flow} />
-          )}
-        </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 sm:divide-x lg:grid-cols-4">
+        <BatteryColumn battery={battery} loading={batteryLoading} />
+        <RateColumn battery={battery} loading={batteryLoading} now={now} />
+        <SolarColumn inverter={inverter} loading={inverterLoading} fields={fields} />
+        <HouseColumn inverter={inverter} loading={inverterLoading} fields={fields} />
       </div>
     </section>
   );
 }
 
-function StatusDot({ ok, label }: { ok: boolean; label: string }) {
+function Column({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
   return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className={cn("size-1.5 rounded-full", ok ? "bg-emerald-500" : "bg-destructive")} />
-      {label}
-    </span>
+    <div className={cn("border-t px-5 py-4 first:border-t-0 sm:[&:nth-child(2)]:border-t-0 lg:border-t-0", className)}>
+      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+      {children}
+    </div>
   );
 }
 
-function PvWatts({ fields, pvFlow }: { fields: InverterSnapshot["fields"]; pvFlow?: unknown }) {
-  const pv = flowPowerWatts(pvFlow) ?? fieldPowerWatts(fields, ["pvInputPower", "generationPower", "pvPower"]);
+function BigNumber({ value, unit, className }: { value: string; unit: string; className?: string }) {
   return (
-    <>
-      <p className="text-5xl font-semibold tabular-nums leading-none text-amber-600 dark:text-amber-400">
-        {pv == null ? "–" : fmtNumber(Math.round(pv), 0)}
-        <span className="ml-1 text-lg font-medium text-muted-foreground">W</span>
-      </p>
-      <div className="mt-2">
-        <PvBreakdown fields={fields} />
-      </div>
-    </>
+    <p className={cn("mt-1 text-4xl font-semibold leading-none tabular-nums xl:text-5xl", className)}>
+      {value}
+      <span className="ml-1 text-lg font-medium text-muted-foreground">{unit}</span>
+    </p>
+  );
+}
+
+function BatteryColumn({ battery, loading }: { battery: BatterySnapshot | null; loading: boolean }) {
+  const soc = battery?.soc ?? null;
+  return (
+    <Column label="Battery">
+      {loading ? (
+        <Skeleton className="mt-2 h-12 w-32" />
+      ) : soc == null || !battery ? (
+        <p className="mt-1 text-sm text-muted-foreground">Connect the battery (BMS) on the Battery page.</p>
+      ) : (
+        <>
+          <BigNumber value={fmtNumber(soc, 0)} unit="%" className={cn(soc < 20 && "text-destructive")} />
+          <div
+            className="mt-3 h-2 overflow-hidden rounded-full bg-muted"
+            role="progressbar"
+            aria-label="Battery charge"
+            aria-valuenow={Math.round(soc)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            <div
+              className={cn("h-full rounded-full", soc < 20 ? "bg-destructive" : "bg-primary")}
+              style={{ width: `${Math.max(0, Math.min(100, soc))}%` }}
+            />
+          </div>
+          <p className="mt-2 text-xs tabular-nums text-muted-foreground">
+            {fmtNumber(battery.remaining_capacity, 1)} of {fmtNumber(battery.rated_capacity, 0)} Ah · {fmtNumber(battery.voltage, 1)} V
+          </p>
+        </>
+      )}
+    </Column>
+  );
+}
+
+function RateColumn({ battery, loading, now }: { battery: BatterySnapshot | null; loading: boolean; now: number }) {
+  if (loading) {
+    return (
+      <Column label="Charge / discharge">
+        <Skeleton className="mt-2 h-12 w-40" />
+      </Column>
+    );
+  }
+  if (!battery) {
+    return (
+      <Column label="Charge / discharge">
+        <p className="mt-1 text-sm text-muted-foreground">No battery readings yet.</p>
+      </Column>
+    );
+  }
+  const state = chargeState(battery.current);
+  const watts = battery.voltage * battery.current;
+  const eta = describeEta(batteryEta(battery, now), now);
+  const tone =
+    state === "charging" ? "text-amber-600 dark:text-amber-400" : state === "discharging" ? "text-sky-600 dark:text-sky-400" : "text-muted-foreground";
+  const flow = state === "charging" ? `${fmtWatts(watts)} into the battery` : state === "discharging" ? `${fmtWatts(watts)} from the battery` : "no flow";
+
+  return (
+    <Column label={state === "charging" ? "Charging" : state === "discharging" ? "Discharging" : "Charge / discharge"}>
+      <BigNumber value={fmtNumber(Math.abs(battery.current), 1)} unit="A" className={tone} />
+      <p className="mt-2 text-xs tabular-nums text-muted-foreground">{flow}</p>
+      <p className="mt-2 text-sm font-medium tabular-nums">{eta.headline}</p>
+      {eta.detail ? <p className="text-xs text-muted-foreground">{eta.detail}</p> : null}
+    </Column>
+  );
+}
+
+function SolarColumn({ inverter, loading, fields }: { inverter: InverterSnapshot | null; loading: boolean; fields: InverterSnapshot["fields"] }) {
+  const pv = inverter ? flowPowerWatts(inverter.pv_panel_flow) ?? fieldPowerWatts(fields, ["pvInputPower", "generationPower", "pvPower"]) : null;
+  return (
+    <Column label="Solar">
+      {loading ? (
+        <Skeleton className="mt-2 h-12 w-32" />
+      ) : !inverter ? (
+        <p className="mt-1 text-sm text-muted-foreground">Add Solar credentials in Settings.</p>
+      ) : (
+        <>
+          <BigNumber value={pv == null ? "–" : fmtNumber(Math.round(pv), 0)} unit="W" className="text-amber-600 dark:text-amber-400" />
+          <p className="mt-2 text-xs text-muted-foreground">{pv != null && pv < 20 ? "No sun on the panels" : "Coming from the panels"}</p>
+          <div className="mt-1">
+            <PvBreakdown fields={fields} />
+          </div>
+        </>
+      )}
+    </Column>
+  );
+}
+
+function HouseColumn({ inverter, loading, fields }: { inverter: InverterSnapshot | null; loading: boolean; fields: InverterSnapshot["fields"] }) {
+  const load = inverter
+    ? flowPowerWatts(inverter.load_flow) ?? fieldPowerWatts(fields, ["load_power", "loadPower", "outputActivePower", "acOutputActivePower"])
+    : null;
+  const loadPercent = fieldValue(fields, ["loadPercentage"]);
+  return (
+    <Column label="House">
+      {loading ? (
+        <Skeleton className="mt-2 h-12 w-32" />
+      ) : !inverter ? (
+        <p className="mt-1 text-sm text-muted-foreground">No inverter readings yet.</p>
+      ) : (
+        <>
+          <BigNumber value={load == null ? "–" : fmtNumber(Math.round(load), 0)} unit="W" />
+          <p className="mt-2 text-xs tabular-nums text-muted-foreground">
+            {loadPercent != null ? `${fmtNumber(loadPercent, 0)}% of the inverter's capacity` : "Being used right now"}
+          </p>
+          <GridStatusPill grid={inverter.grid} stale={inverter.energy_flow_stale} className="mt-2" />
+        </>
+      )}
+    </Column>
+  );
+}
+
+function StatusDot({ ok, warn = false, label }: { ok: boolean; warn?: boolean; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className={cn("size-1.5 rounded-full", warn ? "bg-amber-500" : ok ? "bg-emerald-500" : "bg-destructive")} aria-hidden />
+      {label}
+    </span>
   );
 }

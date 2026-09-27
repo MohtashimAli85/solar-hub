@@ -117,6 +117,24 @@
     --sidebar-ring: oklch(0.56 0.021 213.5);
 }
 
+:root {
+    --viz-accent: oklch(0.586 0.253 17.585);
+    --viz-context: oklch(0.56 0.021 213.5 / 0.3);
+    --viz-context-strong: oklch(0.56 0.021 213.5 / 0.55);
+    --viz-grid: oklch(0.56 0.021 213.5 / 0.16);
+}
+
+.dark {
+    --viz-accent: oklch(0.645 0.246 16.439);
+    --viz-context: oklch(0.723 0.014 214.4 / 0.26);
+    --viz-context-strong: oklch(0.723 0.014 214.4 / 0.5);
+    --viz-grid: oklch(1 0 0 / 0.07);
+}
+
+.viz-hatch {
+    background-image: repeating-linear-gradient(135deg, var(--viz-context-strong) 0 1.5px, transparent 1.5px 6px);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

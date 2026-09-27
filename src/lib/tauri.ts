@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
   AutomationConfig,
+  AutomationDecision,
+  AutomationInsights,
   AutomationStatus,
   BatterySnapshot,
   ConnectionStatus,
@@ -89,5 +91,12 @@ export const updateAutomationConfig = (config: AutomationConfig) =>
   invoke<AutomationConfig>("update_automation_config", { config });
 
 export const forceAutomationCheck = () => invoke<void>("force_automation_check");
+
+export const getAutomationInsights = () => invoke<AutomationInsights>("get_automation_insights");
+
+export const getAutomationDecisions = (limit: number) =>
+  invoke<AutomationDecision[]>("get_automation_decisions", { limit });
+
+export const openRecordsFolder = () => invoke<void>("open_records_folder");
 
 export const sendTestNotification = () => invoke<void>("send_test_notification");

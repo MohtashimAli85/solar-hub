@@ -14,6 +14,17 @@ export function fmtSigned(value: number | null | undefined, digits = 1): string 
   return `${sign}${fmtNumber(value, digits)}`;
 }
 
+/** "under a minute", "7 min", "5 h 50 min", "over a day". */
+export function fmtDuration(minutes: number): string {
+  if (!Number.isFinite(minutes) || minutes < 1) return "under a minute";
+  if (minutes < 60) return `${Math.round(minutes)} min`;
+  if (minutes >= 24 * 60) return "over a day";
+  const hours = Math.floor(minutes / 60);
+  const rest = Math.round(minutes % 60);
+  if (rest === 60) return `${hours + 1} h`;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
 export function fmtHours(hours: number | null | undefined): string {
   if (hours == null || hours === Infinity) return "∞";
   return `${fmtNumber(hours, 1)}h`;
