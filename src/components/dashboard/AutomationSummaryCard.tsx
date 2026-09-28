@@ -28,14 +28,14 @@ export function AutomationSummaryCard({ status, onOpen }: { status: AutomationSt
       : status.ai_reason ?? "Waiting for the first check…";
 
   return (
-    <section className="flex h-full flex-col gap-3 rounded-xl border border-border bg-card p-5">
+    <section className="flex h-full flex-col gap-3 rounded-xl border border-border bg-card p-4 sm:p-5">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="inline-flex items-center gap-2 text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <h3 className="inline-flex items-center gap-2 text-label font-semibold uppercase tracking-wide text-muted-foreground">
           <BrainCircuit className="size-4" aria-hidden /> Automation
         </h3>
         <div className="flex items-center gap-1.5">
           {status.enabled && status.dry_run ? (
-            <span className="text-[10px] font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400">dry run</span>
+            <span className="text-micro font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400">dry run</span>
           ) : null}
           <Badge variant={PHASE_VARIANTS[status.phase]}>{automationPhaseLabel(status.phase)}</Badge>
         </div>

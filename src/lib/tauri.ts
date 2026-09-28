@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./transport";
 import type {
   AppSettings,
   AutomationConfig,
@@ -11,6 +11,7 @@ import type {
   DiscoveredDevice,
   EnergySummary,
   MeterNumber,
+  RemoteStatus,
   InverterSettings,
   InverterSnapshot,
   SavedBleDevice,
@@ -111,3 +112,11 @@ export const setActiveMeter = (meter: MeterNumber, at: string | null) =>
   invoke<EnergySummary>("set_active_meter", { meter, at });
 
 export const setStandbyWatts = (watts: number) => invoke<EnergySummary>("set_standby_watts", { watts });
+
+// — Phone access —
+
+export const getRemoteStatus = () => invoke<RemoteStatus>("get_remote_status");
+
+export const setRemoteEnabled = (enabled: boolean) => invoke<RemoteStatus>("set_remote_enabled", { enabled });
+
+export const regenerateRemotePin = () => invoke<RemoteStatus>("regenerate_remote_pin");

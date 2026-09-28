@@ -62,7 +62,7 @@ export function BudgetBar({ soc, floor, reserve, projected, projectedLabel }: Bu
           {Math.round(level)}%
         </span>
       </div>
-      <figcaption className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground tabular-nums">
+      <figcaption className="flex flex-wrap gap-x-4 gap-y-1 text-micro text-muted-foreground tabular-nums">
         <Legend swatch="viz-hatch bg-muted" label={`Floor ${Math.round(floorAt)}%`} />
         {reserveAt != null ? (
           <>

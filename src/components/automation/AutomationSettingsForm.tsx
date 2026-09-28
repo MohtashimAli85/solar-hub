@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { isDesktop } from "@/lib/transport";
 import type { AutomationConfig } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
@@ -66,7 +67,7 @@ function NumberField({ id, label, help, value, step = 1, error, onChange }: Fiel
         aria-invalid={error != null}
         className={cn(error && "border-destructive focus-visible:ring-destructive")}
       />
-      <p className={cn("text-[11px] leading-snug", error ? "text-destructive" : "text-muted-foreground")}>{error ?? help}</p>
+      <p className={cn("text-micro leading-snug", error ? "text-destructive" : "text-muted-foreground")}>{error ?? help}</p>
     </div>
   );
 }
@@ -127,7 +128,7 @@ export function AutomationSettingsForm({ config, saving, testing, onSave, onTest
                   </option>
                 ))}
               </Select>
-              <p className="text-[11px] leading-snug text-muted-foreground">
+              <p className="text-micro leading-snug text-muted-foreground">
                 The battery plan normally starts here. From sunset the agent may start earlier, when the battery is at least 60%
                 and waiting would leave charge unused by sunrise. Smart load and the oven boost still follow this time.
               </p>
@@ -186,12 +187,14 @@ export function AutomationSettingsForm({ config, saving, testing, onSave, onTest
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
             <div>
               <Label htmlFor="notifications">Notifications</Label>
-              <p className="text-[11px] text-muted-foreground">Banners for every switch, plus battery and grid alerts.</p>
+              <p className="text-micro text-muted-foreground">Banners for every switch, plus battery and grid alerts.</p>
             </div>
             <div className="flex items-center gap-3">
-              <Button variant="ghost" size="sm" onClick={onTestNotification} disabled={testing}>
-                Send test
-              </Button>
+              {isDesktop ? (
+                <Button variant="ghost" size="sm" onClick={onTestNotification} disabled={testing}>
+                  Send test
+                </Button>
+              ) : null}
               <Switch
                 id="notifications"
                 checked={form.notifications_enabled}
@@ -201,7 +204,7 @@ export function AutomationSettingsForm({ config, saving, testing, onSave, onTest
           </div>
 
           {dirty ? (
-            <div className="sticky bottom-0 -mx-5 -mb-5 flex items-center justify-between gap-3 rounded-b-lg border-t border-border bg-card/95 px-5 py-3 backdrop-blur">
+            <div className="sticky bottom-0 -mx-4 -mb-4 sm:-mx-5 sm:-mb-5 flex items-center justify-between gap-3 rounded-b-lg border-t border-border bg-card/95 px-4 sm:px-5 py-3 backdrop-blur">
               <p className="text-sm text-muted-foreground">{hasErrors ? "Fix the highlighted fields to save." : "You have unsaved changes."}</p>
               <div className="flex gap-2">
                 <Button variant="outline" size="sm" onClick={() => setDraft(null)}>

@@ -1,4 +1,5 @@
 import { Area, AreaChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { CHART_FONT } from "@/components/automation/shared";
 import type { BatteryHistoryPoint } from "@/hooks/useBatteryHistory";
 
 interface TrendChartProps {
@@ -38,7 +39,7 @@ export function TrendChart({ data, dataKey, label, unit, color, domain }: TrendC
             </defs>
             <XAxis
               dataKey="label"
-              tick={{ fontSize: 10 }}
+              tick={{ fontSize: CHART_FONT }}
               tickLine={false}
               axisLine={false}
               interval="preserveStartEnd"
@@ -46,7 +47,7 @@ export function TrendChart({ data, dataKey, label, unit, color, domain }: TrendC
             />
             <YAxis
               domain={domain ?? ["auto", "auto"]}
-              tick={{ fontSize: 10 }}
+              tick={{ fontSize: CHART_FONT }}
               tickLine={false}
               axisLine={false}
               width={36}

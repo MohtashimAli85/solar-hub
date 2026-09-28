@@ -254,6 +254,16 @@ export interface AppSettings {
   has_gemini_api_key: boolean;
 }
 
+export interface RemoteStatus {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  pin: string;
+  urls: string[];
+  paired_devices: number;
+  error: string | null;
+}
+
 export interface SolarSettingsInput {
   user_id: string;
   station_id: string;

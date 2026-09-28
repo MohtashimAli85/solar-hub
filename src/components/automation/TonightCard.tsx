@@ -2,7 +2,7 @@ import { CartesianGrid, ComposedChart, Line, ReferenceArea, ReferenceLine, Respo
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import type { AutomationInsights } from "@/lib/types";
 import { fmtNumber } from "@/lib/format";
-import { ChartTooltipBox, Chip, clock, EmptyNote, SectionTitle, smartLoadText, toMs, VIZ } from "./shared";
+import { CHART_FONT, VIZ, ChartTooltipBox, Chip, EmptyNote, SectionTitle, clock, smartLoadText, toMs } from "./shared";
 
 interface Row {
   t: number;
@@ -26,7 +26,7 @@ function mergeSeries(insights: AutomationInsights): Row[] {
 
 function SeriesKey({ measured }: { measured: boolean }) {
   return (
-    <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
+    <div className="flex items-center gap-4 text-micro text-muted-foreground">
       <span className={measured ? "inline-flex items-center gap-1.5" : "hidden"}>
         <svg width="18" height="6" aria-hidden>
           <line x1="0" y1="3" x2="18" y2="3" stroke={VIZ.accent} strokeWidth="2" />
@@ -79,7 +79,7 @@ export function TonightCard({ insights }: { insights: AutomationInsights }) {
         {rows.length < 2 ? (
           <EmptyNote>Waiting for battery and sunrise data to project the night.</EmptyNote>
         ) : (
-          <div className="h-64" role="img" aria-label={`Battery state of charge through the night. ${basisNote}`}>
+          <div className="h-52 sm:h-64" role="img" aria-label={`Battery state of charge through the night. ${basisNote}`}>
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: -8 }}>
                 <CartesianGrid vertical={false} stroke={VIZ.grid} />
@@ -90,7 +90,7 @@ export function TonightCard({ insights }: { insights: AutomationInsights }) {
                   scale="time"
                   domain={["dataMin", "dataMax"]}
                   tickFormatter={(t: number) => clock(t)}
-                  tick={{ fontSize: 10, fill: VIZ.ink }}
+                  tick={{ fontSize: CHART_FONT, fill: VIZ.ink }}
                   tickLine={false}
                   axisLine={false}
                   minTickGap={48}
@@ -99,7 +99,7 @@ export function TonightCard({ insights }: { insights: AutomationInsights }) {
                   domain={[0, 100]}
                   ticks={[0, 25, 50, 75, 100]}
                   tickFormatter={(v: number) => `${v}%`}
-                  tick={{ fontSize: 10, fill: VIZ.ink }}
+                  tick={{ fontSize: CHART_FONT, fill: VIZ.ink }}
                   tickLine={false}
                   axisLine={false}
                   width={44}
@@ -110,19 +110,19 @@ export function TonightCard({ insights }: { insights: AutomationInsights }) {
                     stroke={VIZ.contextStrong}
                     strokeDasharray="2 4"
                     strokeWidth={1.5}
-                    label={{ value: `Reserve ${Math.round(reserve)}%`, position: "insideTopRight", fontSize: 10, fill: VIZ.ink }}
+                    label={{ value: `Reserve ${Math.round(reserve)}%`, position: "insideTopRight", fontSize: CHART_FONT, fill: VIZ.ink }}
                   />
                 ) : null}
                 <ReferenceLine
                   y={floor}
                   stroke="transparent"
-                  label={{ value: `Floor ${Math.round(floor)}%`, position: "insideBottomLeft", fontSize: 10, fill: VIZ.ink }}
+                  label={{ value: `Floor ${Math.round(floor)}%`, position: "insideBottomLeft", fontSize: CHART_FONT, fill: VIZ.ink }}
                 />
                 {sunrise != null ? (
                   <ReferenceLine
                     x={sunrise}
                     stroke={VIZ.contextStrong}
-                    label={{ value: "Sunrise", position: "insideTopRight", fontSize: 10, fill: VIZ.ink }}
+                    label={{ value: "Sunrise", position: "insideTopRight", fontSize: CHART_FONT, fill: VIZ.ink }}
                   />
                 ) : null}
                 <Tooltip
@@ -164,7 +164,7 @@ export function TonightCard({ insights }: { insights: AutomationInsights }) {
             </ResponsiveContainer>
           </div>
         )}
-        <p className="text-[11px] text-muted-foreground">{basisNote}</p>
+        <p className="text-micro text-muted-foreground">{basisNote}</p>
       </CardContent>
     </Card>
   );

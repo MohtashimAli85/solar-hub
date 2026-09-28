@@ -1,8 +1,10 @@
+import { PhoneAccessCard } from "@/components/settings/PhoneAccessCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
 import { useEffect, useState } from "react";
 import { getSolarSettings, updateSolarSettings } from "@/lib/tauri";
+import { isDesktop } from "@/lib/transport";
 import { TZ_PRESETS } from "@/lib/types";
 import type { AppSettings } from "@/lib/types";
 import { Save } from "lucide-react";
@@ -91,8 +93,8 @@ export function SettingsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground">Solar cloud credentials and saved Bluetooth device.</p>
+        <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Settings</h1>
+        <p className="text-sm text-muted-foreground sm:text-base">Solar cloud credentials and phone access.</p>
       </div>
 
       <Card>
@@ -104,7 +106,12 @@ export function SettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-2">
+          {isDesktop ? null : (
+            <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+              These can only be changed in the desktop app.
+            </p>
+          )}
+          <fieldset disabled={!isDesktop} className="grid gap-4 disabled:opacity-70 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label>User ID (email)</Label>
               <Input value={form.user_id} onChange={(event) => set({ user_id: event.target.value })} />
@@ -153,15 +160,18 @@ export function SettingsPage() {
                 onChange={(event) => set({ gemini_api_key: event.target.value })}
               />
             </div>
-          </div>
-          <Button onClick={save} disabled={saving}>
-            <Save /> {saving ? "Saving…" : "Save"}
-          </Button>
+          </fieldset>
+          {isDesktop ? (
+            <Button onClick={save} disabled={saving}>
+              <Save /> {saving ? "Saving…" : "Save"}
+            </Button>
+          ) : null}
           {message ? <p className="text-sm text-emerald-600 dark:text-emerald-400">{message}</p> : null}
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
         </CardContent>
       </Card>
 
+      {isDesktop ? <PhoneAccessCard /> : null}
     </div>
   );
 }

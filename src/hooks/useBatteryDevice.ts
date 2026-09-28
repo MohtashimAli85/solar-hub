@@ -1,4 +1,4 @@
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@/lib/transport";
 import { useCallback, useEffect, useState } from "react";
 import {
   connectBmsDevice,

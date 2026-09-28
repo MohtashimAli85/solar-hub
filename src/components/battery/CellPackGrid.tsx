@@ -15,7 +15,7 @@ export function CellPackGrid({ voltages }: { voltages: number[] }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[13px] tabular-nums text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-label tabular-nums text-muted-foreground">
         <span>min <span className="font-semibold text-foreground">{fmtNumber(min, 3)} V</span></span>
         <span>max <span className="font-semibold text-foreground">{fmtNumber(max, 3)} V</span></span>
         <span>
@@ -57,8 +57,8 @@ export function CellPackGrid({ voltages }: { voltages: number[] }) {
                     : "border-border bg-muted",
               )}
             >
-              <p className="text-[10px] font-medium text-muted-foreground">C{index + 1}</p>
-              <p className="text-[13px] font-semibold tabular-nums">{fmtNumber(voltage, 3)}</p>
+              <p className="text-micro font-medium text-muted-foreground">C{index + 1}</p>
+              <p className="text-label font-semibold tabular-nums">{fmtNumber(voltage, 3)}</p>
               <div className="mt-1 h-1 overflow-hidden rounded-full bg-border">
                 <div
                   className={cn("h-full rounded-full", delta >= 0.1 ? "bg-destructive" : "bg-primary")}

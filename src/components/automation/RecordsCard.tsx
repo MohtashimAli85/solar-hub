@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { isDesktop } from "@/lib/transport";
 import type { AutomationInsights } from "@/lib/types";
 import { FolderOpen } from "lucide-react";
 import { SectionTitle } from "./shared";
@@ -28,9 +29,11 @@ export function RecordsCard({ insights, fallbackDir, opening, error, onOpen }: R
             <span className="text-foreground">{insights.records.decisions_this_month.toLocaleString()}</span> decisions
           </p>
         ) : null}
-        <Button variant="outline" size="sm" onClick={onOpen} disabled={opening}>
-          <FolderOpen /> Open folder
-        </Button>
+        {isDesktop ? (
+          <Button variant="outline" size="sm" onClick={onOpen} disabled={opening}>
+            <FolderOpen /> Open folder
+          </Button>
+        ) : null}
         {error ? <p className="text-xs text-destructive">{error}</p> : null}
         <details className="group rounded-md border border-border px-3 py-2 text-sm">
           <summary className="cursor-pointer select-none font-medium">Connect Excel</summary>

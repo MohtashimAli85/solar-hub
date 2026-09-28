@@ -50,7 +50,7 @@ export function CommandHero({ battery, connection, inverter, inverterUpdatedAt, 
 
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-5 py-3 text-xs">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 sm:px-5 py-3 text-xs">
         <span className="font-semibold uppercase tracking-wide text-muted-foreground">Live plant</span>
         <span className="ml-auto flex flex-wrap items-center gap-3 text-muted-foreground">
           <StatusDot ok={bmsOk} label={bmsOk ? `Battery${connection?.device_name ? ` · ${connection.device_name}` : ""}` : "Battery offline"} />
@@ -70,8 +70,8 @@ export function CommandHero({ battery, connection, inverter, inverterUpdatedAt, 
 
 function Column({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
   return (
-    <div className={cn("border-t px-5 py-4 first:border-t-0 sm:[&:nth-child(2)]:border-t-0 lg:border-t-0", className)}>
-      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+    <div className={cn("border-t px-4 sm:px-5 py-4 first:border-t-0 sm:[&:nth-child(2)]:border-t-0 lg:border-t-0", className)}>
+      <p className="text-micro font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
       {children}
     </div>
   );
@@ -79,7 +79,7 @@ function Column({ label, children, className }: { label: string; children: React
 
 function BigNumber({ value, unit, className }: { value: string; unit: string; className?: string }) {
   return (
-    <p className={cn("mt-1 text-4xl font-semibold leading-none tabular-nums xl:text-5xl", className)}>
+    <p className={cn("mt-1 text-3xl font-semibold leading-none tabular-nums sm:text-4xl xl:text-5xl", className)}>
       {value}
       <span className="ml-1 text-lg font-medium text-muted-foreground">{unit}</span>
     </p>

@@ -1,9 +1,9 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternal } from "@/lib/transport";
 import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { fmtNumber } from "@/lib/format";
 import type { AutomationInsights } from "@/lib/types";
-import { ChartTooltipBox, dayLabel, EmptyNote, SectionTitle, Stat, VIZ } from "./shared";
+import { CHART_FONT, VIZ, ChartTooltipBox, EmptyNote, SectionTitle, Stat, dayLabel } from "./shared";
 
 function dayName(date: string, reference: string | null): string {
   const target = new Date(`${date}T12:00:00`);
@@ -24,12 +24,12 @@ function compare(value: number | null | undefined, average: number | null | unde
 
 function Credit() {
   return (
-    <p className="text-[11px] text-muted-foreground">
+    <p className="text-micro text-muted-foreground">
       Weather data by{" "}
       <button
         type="button"
         className="underline underline-offset-2 hover:text-foreground"
-        onClick={() => void openUrl("https://open-meteo.com/")}
+        onClick={() => openExternal("https://open-meteo.com/")}
       >
         Open-Meteo.com
       </button>{" "}
@@ -90,7 +90,7 @@ export function WeatherCard({ insights }: { insights: AutomationInsights }) {
           <div className="h-32" role="img" aria-label="Daily solar energy for the last week and the forecast day">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={bars} margin={{ top: 4, right: 0, bottom: 0, left: -8 }} barCategoryGap={6}>
-                <XAxis dataKey="label" tick={{ fontSize: 10, fill: VIZ.ink }} tickLine={false} axisLine={false} />
+                <XAxis dataKey="label" tick={{ fontSize: CHART_FONT, fill: VIZ.ink }} tickLine={false} axisLine={false} />
                 <YAxis hide domain={[0, "auto"]} />
                 <Tooltip
                   cursor={{ fill: VIZ.grid }}

@@ -33,7 +33,7 @@ export function InverterPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Inverter</h1>
+        <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Inverter</h1>
         <p className="text-sm text-muted-foreground">
           Live power flows, output source and the inverter's advanced settings.
         </p>
@@ -83,9 +83,9 @@ export function InverterPage() {
           </div>
 
           <details className="group rounded-xl border border-border bg-card">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 p-5 [&::-webkit-details-marker]:hidden">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 p-4 sm:p-5 [&::-webkit-details-marker]:hidden">
               <div className="flex flex-col space-y-1">
-                <h3 className="text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <h3 className="text-label font-semibold uppercase tracking-wide text-muted-foreground">
                   Advanced — charger + device settings
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -94,7 +94,7 @@ export function InverterPage() {
               </div>
               <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
             </summary>
-            <div className="space-y-5 p-5 pt-0">
+            <div className="space-y-5 p-4 pt-0 sm:p-5 sm:pt-0">
               <ChargerPrioritySelector
                 settings={settings}
                 pending={settingsHook.setCharger.isPending}
@@ -140,7 +140,7 @@ export function InverterPage() {
           </details>
 
           <details className="group rounded-lg border border-border bg-card shadow-sm">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 p-5 [&::-webkit-details-marker]:hidden">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 p-4 sm:p-5 [&::-webkit-details-marker]:hidden">
               <div className="flex flex-col space-y-1">
                 <h3 className="text-base font-semibold leading-none tracking-tight">
                   Raw fields
@@ -151,7 +151,7 @@ export function InverterPage() {
               </div>
               <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
             </summary>
-            <div className="p-5 pt-0">
+            <div className="p-4 pt-0 sm:p-5 sm:pt-0">
               <RawFields fields={snapshot.fields} />
             </div>
           </details>

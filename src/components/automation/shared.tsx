@@ -29,6 +29,8 @@ export function automationPhaseLabel(phase: AutomationPhase): string {
   return PHASE_LABELS[phase] ?? phase;
 }
 
+export const CHART_FONT = 11;
+
 export const VIZ = {
   accent: "var(--viz-accent)",
   context: "var(--viz-context)",
@@ -79,7 +81,7 @@ export function SectionTitle({ eyebrow, title, aside }: { eyebrow?: string; titl
     <div className="flex flex-wrap items-end justify-between gap-2">
       <div className="space-y-0.5">
         {eyebrow ? (
-          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">{eyebrow}</p>
+          <p className="text-micro font-semibold uppercase tracking-[0.14em] text-muted-foreground">{eyebrow}</p>
         ) : null}
         <h3 className="text-base font-semibold tracking-tight">{title}</h3>
       </div>
@@ -91,9 +93,9 @@ export function SectionTitle({ eyebrow, title, aside }: { eyebrow?: string; titl
 export function Stat({ label, value, hint, className }: { label: string; value: ReactNode; hint?: ReactNode; className?: string }) {
   return (
     <div className={cn("min-w-0 space-y-0.5", className)}>
-      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="text-micro uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="text-lg font-semibold leading-tight tabular-nums">{value}</p>
-      {hint ? <p className="text-[11px] leading-snug text-muted-foreground">{hint}</p> : null}
+      {hint ? <p className="text-micro leading-snug text-muted-foreground">{hint}</p> : null}
     </div>
   );
 }

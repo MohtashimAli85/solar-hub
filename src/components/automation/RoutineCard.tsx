@@ -2,7 +2,7 @@ import { Bar, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } 
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { fmtNumber } from "@/lib/format";
 import type { AutomationInsights } from "@/lib/types";
-import { ChartTooltipBox, EmptyNote, hourLabel, SectionTitle, VIZ } from "./shared";
+import { CHART_FONT, VIZ, ChartTooltipBox, EmptyNote, SectionTitle, hourLabel } from "./shared";
 
 const NIGHT_HOURS = [18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7];
 const NIGHTS_NEEDED = 7;
@@ -25,7 +25,7 @@ export function RoutineCard({ insights }: { insights: AutomationInsights }) {
           title={routine.quiet_by != null ? `Usually quiet by ~${hourLabel(routine.quiet_by)}` : "Evening and night load"}
           aside={
             hasTypical ? (
-              <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
+              <div className="flex items-center gap-4 text-micro text-muted-foreground">
                 <span className="inline-flex items-center gap-1.5">
                   <span className="inline-block h-2.5 w-3 rounded-[2px] bg-[var(--viz-context-strong)]" aria-hidden />
                   Typical (last {routine.nights_with_data} nights)
@@ -51,20 +51,20 @@ export function RoutineCard({ insights }: { insights: AutomationInsights }) {
           </EmptyNote>
         ) : (
           <>
-            <div className="h-44" role="img" aria-label="Typical house load per hour of the night compared with tonight">
+            <div className="h-40 sm:h-44" role="img" aria-label="Typical house load per hour of the night compared with tonight">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={rows} margin={{ top: 4, right: 0, bottom: 0, left: -8 }} barCategoryGap={2}>
                   <XAxis
                     dataKey="hour"
                     tickFormatter={(hour: number) => hourLabel(hour)}
-                    tick={{ fontSize: 10, fill: VIZ.ink }}
+                    tick={{ fontSize: CHART_FONT, fill: VIZ.ink }}
                     tickLine={false}
                     axisLine={false}
                     interval={1}
                   />
                   <YAxis
                     tickFormatter={(v: number) => `${fmtNumber(v, 0)} W`}
-                    tick={{ fontSize: 10, fill: VIZ.ink }}
+                    tick={{ fontSize: CHART_FONT, fill: VIZ.ink }}
                     tickLine={false}
                     axisLine={false}
                     width={52}
@@ -101,11 +101,11 @@ export function RoutineCard({ insights }: { insights: AutomationInsights }) {
               </ResponsiveContainer>
             </div>
             {routine.nights_with_data < NIGHTS_NEEDED ? (
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-micro text-muted-foreground">
                 {routine.nights_with_data} of {NIGHTS_NEEDED} nights recorded — the routine sharpens as more nights come in.
               </p>
             ) : (
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-micro text-muted-foreground">
                 Median of the last {NIGHTS_NEEDED} nights, so it follows the season as nights cool.
               </p>
             )}

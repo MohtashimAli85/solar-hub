@@ -56,12 +56,12 @@ export function UnitsCard() {
 
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card" aria-labelledby="units-title">
-      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b px-5 py-3">
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b px-4 sm:px-5 py-3">
         <div>
           <h2 id="units-title" className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Electricity units
           </h2>
-          <p className="text-[11px] text-muted-foreground">Taken from the grid · 1 unit = 1 kWh</p>
+          <p className="text-micro text-muted-foreground">Taken from the grid · 1 unit = 1 kWh</p>
         </div>
         {summary.configured ? (
           <MeterSwitcher
@@ -75,7 +75,7 @@ export function UnitsCard() {
       </div>
 
       {!summary.configured ? (
-        <p className="px-5 py-6 text-sm text-muted-foreground">Add your Solar of Things login in Settings to count units.</p>
+        <p className="px-4 sm:px-5 py-6 text-sm text-muted-foreground">Add your Solar of Things login in Settings to count units.</p>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 lg:divide-x">
           <TodayColumn summary={summary} />
@@ -84,7 +84,7 @@ export function UnitsCard() {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t px-5 py-3 text-xs text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t px-4 sm:px-5 py-3 text-xs text-muted-foreground">
         <ReadingPicker
           day={summary.bill_reading_day}
           time={summary.bill_reading_time}
@@ -132,7 +132,7 @@ function ReadingPicker({
     if (draftTime && draftTime !== time) onSave(day, draftTime);
   };
   const field =
-    "h-7 rounded-md border border-border bg-background px-1.5 text-xs tabular-nums text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+    "h-7 rounded-md border border-border bg-background px-1.5 text-xs pointer-coarse:h-10 pointer-coarse:text-base tabular-nums text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
   return (
     <div className="inline-flex flex-wrap items-center gap-2">
       <label className="inline-flex items-center gap-2">
@@ -210,7 +210,7 @@ function StandbyField({
         onKeyDown={(event) => {
           if (event.key === "Enter") save();
         }}
-        className="h-7 w-14 rounded-md border border-border bg-background px-1.5 text-xs tabular-nums text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="h-7 w-14 rounded-md border border-border bg-background px-1.5 text-xs pointer-coarse:h-10 pointer-coarse:w-16 pointer-coarse:text-base tabular-nums text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
       W
       {error ? (
@@ -269,7 +269,7 @@ function Digit({ digit, dim = false, fraction = false, className }: { digit: str
     <span
       aria-hidden
       className={cn(
-        "grid h-11 w-8 place-items-center rounded-[3px] bg-linear-to-b from-white/10 via-transparent to-white/5 text-2xl font-semibold leading-none tabular-nums",
+        "grid h-10 w-7 place-items-center rounded-[3px] bg-linear-to-b from-white/10 via-transparent to-white/5 text-xl sm:h-11 sm:w-8 sm:text-2xl font-semibold leading-none tabular-nums",
         fraction ? "bg-[var(--viz-accent)] text-white" : dim ? "text-neutral-500" : "text-neutral-100",
         className,
       )}
@@ -283,8 +283,8 @@ function TodayColumn({ summary }: { summary: EnergySummary }) {
   const today = summary.today;
   const yesterday = summary.yesterday;
   return (
-    <div className="px-5 py-4">
-      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Today so far</p>
+    <div className="px-4 sm:px-5 py-4">
+      <p className="text-micro font-medium uppercase tracking-wide text-muted-foreground">Today so far</p>
       {today ? (
         <>
           <MeterRegister kwh={today.grid_kwh} />
@@ -390,7 +390,7 @@ function MeterSwitcher({
         : `since ${sinceDate.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}, ${fmtTime(since)}`;
 
   return (
-    <div className="flex flex-col items-end gap-1">
+    <div className="flex flex-col items-start gap-1 sm:items-end">
       <div className="flex items-center gap-2 text-xs">
         <span className="text-muted-foreground">Grid from</span>
         <div role="radiogroup" aria-label="Meter the changeover switch is on" className="inline-flex rounded-md border border-border p-0.5">
@@ -413,9 +413,9 @@ function MeterSwitcher({
           ))}
         </div>
       </div>
-      {target == null ? <p className="text-[11px] tabular-nums text-muted-foreground">{sinceText}</p> : null}
+      {target == null ? <p className="text-micro tabular-nums text-muted-foreground">{sinceText}</p> : null}
       {target != null ? (
-        <form onSubmit={submit} className="flex flex-wrap items-center justify-end gap-2 text-xs">
+        <form onSubmit={submit} className="flex flex-wrap items-center gap-2 text-xs sm:justify-end">
           <label className="inline-flex items-center gap-1.5">
             Switched to Meter {target} at
             <input
@@ -423,7 +423,7 @@ function MeterSwitcher({
               value={time}
               max={openedAt}
               onChange={(event) => setTime(event.target.value)}
-              className="h-7 rounded-md border border-border bg-background px-1.5 tabular-nums text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="h-7 rounded-md border border-border bg-background px-1.5 pointer-coarse:h-10 pointer-coarse:text-base tabular-nums text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
           </label>
           <Button type="submit" size="sm" disabled={pending}>
@@ -435,7 +435,7 @@ function MeterSwitcher({
         </form>
       ) : null}
       {error ? (
-        <p role="alert" className="text-[11px] text-destructive">
+        <p role="alert" className="text-micro text-destructive">
           {error}
         </p>
       ) : null}
@@ -445,7 +445,7 @@ function MeterSwitcher({
 
 function BillsColumn({ summary }: { summary: EnergySummary }) {
   return (
-    <div className="space-y-4 border-t px-5 py-4 lg:border-t-0">
+    <div className="space-y-4 border-t px-4 sm:px-5 py-4 lg:border-t-0">
       {summary.bill ? <BillBlock title="This bill" period={summary.bill} active={summary.active_meter} /> : null}
       {summary.previous_bill ? (
         <BillBlock title="Last bill" period={summary.previous_bill} active={summary.active_meter} previous />
@@ -464,7 +464,7 @@ function BillBlock({ title, period, active, previous = false }: { title: string;
   const missing = period.days_total - period.days_with_data;
   return (
     <div>
-      <p className="flex flex-wrap items-baseline justify-between gap-x-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+      <p className="flex flex-wrap items-baseline justify-between gap-x-2 text-micro font-medium uppercase tracking-wide text-muted-foreground">
         <span>{title}</span>
         <span className="normal-case tracking-normal tabular-nums">
           {readingMoment(period.start)} – {readingMoment(period.end)}
@@ -526,8 +526,8 @@ function RecentColumn({ days }: { days: DayUnits[] }) {
   const max = Math.max(0.5, ...days.map((day) => day.grid_kwh));
   const todayKey = days[days.length - 1]?.date;
   return (
-    <div className="border-t px-5 py-4 lg:border-t-0">
-      <p className="flex items-baseline justify-between text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+    <div className="border-t px-4 sm:px-5 py-4 lg:border-t-0">
+      <p className="flex items-baseline justify-between text-micro font-medium uppercase tracking-wide text-muted-foreground">
         <span>Last 14 days</span>
         <span className="normal-case tracking-normal tabular-nums">tallest {unitsLabel(max)}</span>
       </p>
@@ -559,14 +559,14 @@ function RecentColumn({ days }: { days: DayUnits[] }) {
                   <div className="w-full border-t border-dashed border-muted-foreground/40" />
                 )}
               </div>
-              <span className={cn("text-[10px] tabular-nums text-muted-foreground", day.date === todayKey && "font-semibold text-foreground")}>
+              <span className={cn("text-micro tabular-nums text-muted-foreground", day.date === todayKey && "font-semibold text-foreground")}>
                 {parseDay(day.date).getDate()}
               </span>
             </div>
           );
         })}
       </div>
-      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-micro text-muted-foreground">
         <Legend fill={GRID_FILL["1"]} label="Meter 1" />
         <Legend fill={GRID_FILL["2"]} label="Meter 2" />
         <Legend fill={GRID_FILL.none} label="Not assigned" />

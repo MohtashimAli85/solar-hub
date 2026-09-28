@@ -2,7 +2,7 @@ import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { fmtNumber } from "@/lib/format";
 import type { AutomationInsights, ProjectionMethod } from "@/lib/types";
-import { ChartTooltipBox, clock, EmptyNote, SectionTitle, smartLoadText, Stat, toMs, VIZ } from "./shared";
+import { CHART_FONT, VIZ, ChartTooltipBox, EmptyNote, SectionTitle, Stat, clock, smartLoadText, toMs } from "./shared";
 
 const METHOD_NOTE: Record<ProjectionMethod, string> = {
   pv_array: "Projected from your array size and the forecast sun, minus your usual house load, up to the inverter's charge limit.",
@@ -77,7 +77,7 @@ export function TodayCard({ insights }: { insights: AutomationInsights }) {
                 <XAxis
                   dataKey="t"
                   tickFormatter={(t: number) => clock(t)}
-                  tick={{ fontSize: 10, fill: VIZ.ink }}
+                  tick={{ fontSize: CHART_FONT, fill: VIZ.ink }}
                   tickLine={false}
                   axisLine={false}
                   interval="preserveStartEnd"
@@ -110,7 +110,7 @@ export function TodayCard({ insights }: { insights: AutomationInsights }) {
             </ResponsiveContainer>
           </div>
         ) : null}
-        <p className="text-[11px] text-muted-foreground">{METHOD_NOTE[day.method]}</p>
+        <p className="text-micro text-muted-foreground">{METHOD_NOTE[day.method]}</p>
       </CardContent>
     </Card>
   );

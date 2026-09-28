@@ -55,7 +55,7 @@ export function DecisionTimeline({ decisions, canShowMore, onShowMore }: Decisio
               return (
                 <li
                   key={`${decision.at}-${decision.mode}-${decision.reason.slice(0, 12)}`}
-                  className="grid grid-cols-[4.5rem_1fr] gap-3 border-l border-border py-2.5 pl-4 relative"
+                  className="grid grid-cols-[3.75rem_1fr] gap-2 border-l sm:grid-cols-[4.5rem_1fr] sm:gap-3 border-border py-2.5 pl-4 relative"
                 >
                   <span
                     className={cn(
@@ -77,13 +77,13 @@ export function DecisionTimeline({ decisions, canShowMore, onShowMore }: Decisio
                       ) : null}
                       <span
                         className={cn(
-                          "rounded-full px-1.5 py-px text-[10px] uppercase tracking-wide",
+                          "rounded-full px-1.5 py-px text-micro uppercase tracking-wide",
                           decision.applied ? "bg-primary/10 text-foreground" : "bg-muted text-muted-foreground",
                         )}
                       >
                         {outcome(decision)}
                       </span>
-                      {decision.dry_run ? <span className="text-[10px] uppercase tracking-wide text-sky-600 dark:text-sky-400">dry run</span> : null}
+                      {decision.dry_run ? <span className="text-micro uppercase tracking-wide text-sky-600 dark:text-sky-400">dry run</span> : null}
                     </div>
                     <p className="text-sm leading-snug">{decision.reason}</p>
                   </div>

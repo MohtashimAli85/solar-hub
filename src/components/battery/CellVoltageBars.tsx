@@ -25,21 +25,21 @@ export function CellVoltageBars({ voltages }: CellVoltageBarsProps) {
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div className="rounded-md border border-border bg-card p-3 text-center">
-          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Min</p>
+          <p className="text-micro font-medium uppercase tracking-wide text-muted-foreground">Min</p>
           <p className="text-sm font-semibold tabular-nums">{fmtNumber(min, 3)} V</p>
         </div>
         <div className="rounded-md border border-border bg-card p-3 text-center">
-          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Max</p>
+          <p className="text-micro font-medium uppercase tracking-wide text-muted-foreground">Max</p>
           <p className="text-sm font-semibold tabular-nums">{fmtNumber(max, 3)} V</p>
         </div>
         <div className="rounded-md border border-border bg-card p-3 text-center">
-          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Delta</p>
+          <p className="text-micro font-medium uppercase tracking-wide text-muted-foreground">Delta</p>
           <p className={cn("text-sm font-semibold tabular-nums", delta >= 0.1 ? "text-destructive" : "")}>
             {fmtNumber(delta, 3)} V
           </p>
         </div>
         <div className="rounded-md border border-border bg-card p-3 text-center">
-          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Avg</p>
+          <p className="text-micro font-medium uppercase tracking-wide text-muted-foreground">Avg</p>
           <p className="text-sm font-semibold tabular-nums">{fmtNumber(avg, 3)} V</p>
         </div>
       </div>
@@ -54,7 +54,7 @@ export function CellVoltageBars({ voltages }: CellVoltageBarsProps) {
           const imbalanced = isImbalanced(voltage);
           return (
             <div key={index} className="flex flex-col items-center gap-1">
-              <p className="text-[10px] tabular-nums text-muted-foreground">{fmtNumber(voltage, 3)}</p>
+              <p className="text-micro tabular-nums text-muted-foreground">{fmtNumber(voltage, 3)}</p>
               <div className="flex h-20 items-end rounded-sm border border-border bg-muted/40 p-0.5">
                 <div
                   className={cn(
@@ -71,7 +71,7 @@ export function CellVoltageBars({ voltages }: CellVoltageBarsProps) {
                   title={`Cell ${index + 1}: ${voltage.toFixed(3)} V`}
                 />
               </div>
-              <p className="text-[10px] text-muted-foreground">C{index + 1}</p>
+              <p className="text-micro text-muted-foreground">C{index + 1}</p>
             </div>
           );
         })}

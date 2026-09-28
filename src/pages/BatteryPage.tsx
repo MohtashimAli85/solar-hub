@@ -9,6 +9,7 @@ import { fmtNumber } from "@/lib/format";
 import { useBatteryDevice } from "@/hooks/useBatteryDevice";
 import { useBatteryHistory } from "@/hooks/useBatteryHistory";
 import { getSavedBmsDevice } from "@/lib/tauri";
+import { isDesktop } from "@/lib/transport";
 import type { SavedBleDevice } from "@/lib/types";
 import { AlertCircle, X } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -27,7 +28,7 @@ export function BatteryPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Battery</h1>
+        <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Battery</h1>
         <p className="text-sm text-muted-foreground">
           Is the pack healthy? JBD BMS over Bluetooth — direct pack telemetry.
         </p>
@@ -53,26 +54,28 @@ export function BatteryPage() {
         </div>
       ) : null}
 
-      <DeviceSelector
-        devices={battery.devices}
-        connection={battery.connection}
-        scanning={battery.scanning}
-        busyDeviceId={battery.busyDeviceId}
-        onScan={battery.scan}
-        onConnect={battery.connect}
-        onDisconnect={battery.disconnect}
-        onReconnectSaved={battery.reconnectSaved}
-        savedDeviceId={saved?.id}
-      />
+      {isDesktop ? (
+        <DeviceSelector
+          devices={battery.devices}
+          connection={battery.connection}
+          scanning={battery.scanning}
+          busyDeviceId={battery.busyDeviceId}
+          onScan={battery.scan}
+          onConnect={battery.connect}
+          onDisconnect={battery.disconnect}
+          onReconnectSaved={battery.reconnectSaved}
+          savedDeviceId={saved?.id}
+        />
+      ) : null}
 
       {!battery.snapshot ? (
-        <EmptyState message="Connect a battery to see telemetry." />
+        <EmptyState message={isDesktop ? "Connect a battery to see telemetry." : "Connect the battery from the desktop app to see telemetry."} />
       ) : (
         <>
           <PackHealthHero snapshot={battery.snapshot} />
 
-          <section className="rounded-xl border border-border bg-card p-5">
-            <h3 className="text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <section className="rounded-xl border border-border bg-card p-4 sm:p-5">
+            <h3 className="text-label font-semibold uppercase tracking-wide text-muted-foreground">
               Cell map
             </h3>
             <p className="mt-0.5 text-xs text-muted-foreground">
@@ -84,8 +87,8 @@ export function BatteryPage() {
             </div>
           </section>
 
-          <section className="rounded-xl border border-border bg-card p-5">
-            <h3 className="text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <section className="rounded-xl border border-border bg-card p-4 sm:p-5">
+            <h3 className="text-label font-semibold uppercase tracking-wide text-muted-foreground">
               Temperatures
             </h3>
             <div className="mt-3">

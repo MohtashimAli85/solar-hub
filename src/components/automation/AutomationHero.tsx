@@ -73,13 +73,13 @@ export function AutomationHero({
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card">
       {status.dry_run && status.enabled ? (
-        <div className="flex items-center gap-2 border-b border-sky-500/20 bg-sky-500/10 px-5 py-2 text-xs text-sky-700 dark:text-sky-300">
+        <div className="flex items-center gap-2 border-b border-sky-500/20 bg-sky-500/10 px-4 sm:px-5 py-2 text-xs text-sky-700 dark:text-sky-300">
           <FlaskConical className="size-3.5" aria-hidden />
           Dry run — nothing is written to the inverter. Everything below shows what it would do.
         </div>
       ) : null}
 
-      <div className="space-y-5 p-5">
+      <div className="space-y-5 p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant={PHASE_VARIANTS[status.phase]}>{automationPhaseLabel(status.phase)}</Badge>

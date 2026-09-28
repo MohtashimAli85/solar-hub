@@ -22,7 +22,7 @@ export function AutomationPage({ onOpenSettings }: { onOpenSettings: () => void 
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Automation</h1>
+        <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Automation</h1>
         <p className="text-sm text-muted-foreground">
           The agent plans how much battery to use each night, and keeps it charging properly by day.
         </p>

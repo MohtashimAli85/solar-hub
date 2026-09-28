@@ -14,9 +14,9 @@ export function PackHealthHero({ snapshot }: { snapshot: BatterySnapshot }) {
   const etaText = describeEta(eta);
 
   return (
-    <section className="rounded-xl border border-border bg-card p-5">
+    <section className="rounded-xl border border-border bg-card p-4 sm:p-5">
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <h3 className="text-label font-semibold uppercase tracking-wide text-muted-foreground">
           Pack health
         </h3>
         <span className="ml-auto flex flex-wrap gap-1.5">
@@ -38,7 +38,7 @@ export function PackHealthHero({ snapshot }: { snapshot: BatterySnapshot }) {
 
       <div className="mt-3 grid gap-5 sm:grid-cols-5">
         <div className="sm:col-span-2">
-          <p className="text-6xl font-semibold tabular-nums leading-none">
+          <p className="text-5xl font-semibold tabular-nums leading-none sm:text-6xl">
             {fmtNumber(snapshot.soc, 0)}
             <span className="ml-1 text-lg font-medium text-muted-foreground">%</span>
           </p>
@@ -58,7 +58,7 @@ export function PackHealthHero({ snapshot }: { snapshot: BatterySnapshot }) {
             {fmtNumber(snapshot.remaining_capacity, 0)}/{fmtNumber(snapshot.rated_capacity, 0)} Ah · {snapshot.cycles} cycles
           </p>
         </div>
-        <div className="grid grid-cols-3 gap-3 sm:col-span-3">
+        <div className="grid grid-cols-3 gap-2 sm:col-span-3 sm:gap-3">
           <HealthStat
             label="Pack power"
             value={`${fmtSigned(Math.round(packWatts), 0)} W`.replace("-", "−")}
@@ -84,9 +84,9 @@ export function PackHealthHero({ snapshot }: { snapshot: BatterySnapshot }) {
 function HealthStat({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: string }) {
   return (
     <div className="rounded-lg border border-border bg-muted px-3 py-3">
-      <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="text-micro font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className={cn("mt-1 text-lg font-semibold tabular-nums", accent)}>{value}</p>
-      {sub ? <p className="mt-0.5 text-[11px] text-muted-foreground">{sub}</p> : null}
+      {sub ? <p className="mt-0.5 text-micro text-muted-foreground">{sub}</p> : null}
     </div>
   );
 }

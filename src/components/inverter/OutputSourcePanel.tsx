@@ -41,11 +41,11 @@ export function OutputSourcePanel({
     <section
       className={cn(
         "rounded-xl border border-border bg-card",
-        compact ? "p-4" : "p-5",
+        compact ? "p-4" : "p-4 sm:p-5",
       )}
     >
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <h3 className="text-label font-semibold uppercase tracking-wide text-muted-foreground">
           {title}
         </h3>
         {pending || smartLoadPending ? (
@@ -74,7 +74,7 @@ export function OutputSourcePanel({
               disabled={disabled || pending}
               onClick={() => onSet(mode.value)}
               className={cn(
-                "rounded-md px-2 py-2 text-sm font-semibold tracking-wide transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                "rounded-md px-1.5 py-2 text-xs font-semibold tracking-wide transition-colors sm:px-2 sm:text-sm pointer-coarse:py-3 disabled:cursor-not-allowed disabled:opacity-50",
                 active
                   ? "bg-primary text-primary-foreground"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -85,7 +85,7 @@ export function OutputSourcePanel({
           );
         })}
       </div>
-      <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
+      <p className="mt-2 text-micro leading-snug text-muted-foreground">
         {MODE_HINTS[String(currentValue ?? "")] ?? "Pick where the house draws power from."} Changing it by hand pauses automation until the next window.
       </p>
 
@@ -102,7 +102,7 @@ export function OutputSourcePanel({
               {smartLoadOn ? "on — heavy loads cut" : "off — everything runs"}
             </span>
           </p>
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-micro text-muted-foreground">
             {smartLoadUnsupported
               ? "Not supported by this device"
               : "On cuts heavy and non-UPS loads to protect the battery. Off lets everything run."}

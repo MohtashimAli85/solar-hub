@@ -18,7 +18,7 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
+        <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Dashboard</h1>
         <p className="text-sm text-muted-foreground">Where your power is coming from and going, and what the automation is doing.</p>
       </div>
 
