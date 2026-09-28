@@ -89,6 +89,10 @@ battery left unused is grid units that weren't saved. So from sunset:
   the battery would still hold at sunrise if it waited** for the usual start.
   If that's well above the reserve it wants, it starts the battery now. If
   not, it waits in Solar mode and checks again later in the evening.
+- The app double-checks that choice. If the agent picks an early start but
+  waiting would leave no more than the reserve it asked for at sunrise,
+  starting early gains nothing. The app then stays in Solar mode and asks
+  again at the agent's recheck time.
 
 To do this better over time it also sees **how the last 7 nights went**:
 

@@ -1159,11 +1159,19 @@ fn build_night_input(
         smart_load: smart_load_brief(&ctx.clock, reading),
         usual_night_start: hhmm(ctx.clock.night_start()),
         before_usual_start: now < ctx.clock.night_start(),
-        sunrise_soc_if_waiting: (now < ctx.clock.night_start() && !on_battery)
-            .then(|| night_trajectory(ctx, reading, config, ctx.clock.night_start(), soc, None).0)
-            .and_then(|points| points.last().map(|point| point.soc.round())),
+        sunrise_soc_if_waiting: (!on_battery).then(|| sunrise_soc_if_waiting(ctx, reading, config, soc)).flatten().map(f64::round),
         recent_nights: recent_night_rows(ctx),
     }
+}
+
+/// Before the usual night start: the SOC left at sunrise if the battery waits
+/// for the usual start and then runs the rest of the night.
+fn sunrise_soc_if_waiting(ctx: &Context, reading: &EngineReading, config: &AutomationConfig, soc: f64) -> Option<f64> {
+    let usual_start = ctx.clock.night_start();
+    if ctx.clock.now >= usual_start {
+        return None;
+    }
+    night_trajectory(ctx, reading, config, usual_start, soc, None).0.last().map(|point| point.soc)
 }
 
 fn round1(value: f64) -> f64 {
@@ -1470,6 +1478,22 @@ async fn night_deciding(
     let stay_on_grid = |memory: &mut EngineMemory| {
         memory.night.next_check_at = Some(recheck_at);
     };
+
+    // An early start only helps when waiting would leave battery unused at
+    // sunrise; otherwise the battery is needed for the night.
+    let waiting_leaves = sunrise_soc_if_waiting(ctx, reading, config, soc);
+    if plan.on_battery && waiting_leaves.is_some_and(|left| left <= plan.reserve_soc) {
+        let reason = format!(
+            "Solar mode until {} — the battery is needed for the night: waiting would leave only about {} by sunrise, under the {} reserve.",
+            hhmm(usual_start),
+            fmt_pct(waiting_leaves.unwrap_or_default().max(0.0).round()),
+            fmt_pct(plan.reserve_soc)
+        );
+        engine.record(now, Window::Night, "solar", Some(plan.reserve_soc), None, None, false, &reason);
+        engine.set_reason(&reason).await;
+        memory.night.next_check_at = Some(usual_start.min(recheck_at.max(now)));
+        return until(now, memory.night.next_check_at, normal_interval(config));
+    }
 
     if !plan.on_battery || soc <= plan.reserve_soc {
         engine.record_by(plan.model.as_deref(), now, Window::Night, "solar", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), false, &plan.reason);
@@ -2492,12 +2516,21 @@ mod tests {
         assert_eq!(h.decisions()[0].mode, "solar");
     }
 
+    fn quiet_nights(now: NaiveDateTime) -> Context {
+        let mut context = ctx(now);
+        context.profile = NightProfile {
+            nights_with_data: 3,
+            hourly: (0..24).map(|hour| history::HourLoad { hour, load_w: 120.0, nights: 3 }).collect(),
+        };
+        context
+    }
+
     #[tokio::test]
     async fn a_full_battery_lets_the_agent_start_the_evening_on_battery() {
         let h = Harness::new(true);
         let agent = FakeAgent::new(vec![plan("sbg", 30.0, 45.0)], vec![]);
         let mut memory = night_memory();
-        night_tick(&h.engine(&agent), &mut memory, &reading(92.0, SOLAR_MODE, 450.0), &ctx(at(26, 18, 40))).await;
+        night_tick(&h.engine(&agent), &mut memory, &reading(92.0, SOLAR_MODE, 450.0), &quiet_nights(at(26, 18, 40))).await;
         assert_eq!(agent.night_calls.load(Ordering::SeqCst), 1);
         assert_eq!(memory.night.effective_mode, Some(SBG_MODE));
         assert_eq!(memory.night.phase, NightPhase::Verifying);
@@ -2523,14 +2556,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_early_start_that_saves_nothing_is_overruled() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![plan("sbg", 30.0, 45.0)], vec![]);
+        let mut memory = night_memory();
+        night_tick(&h.engine(&agent), &mut memory, &reading(68.0, SOLAR_MODE, 450.0), &ctx(at(26, 18, 40))).await;
+        assert_eq!(agent.night_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(memory.night.effective_mode, Some(SOLAR_MODE), "a busy night from 21:00 uses the whole battery anyway");
+        assert_eq!(memory.night.next_check_at, Some(at(26, 19, 25)));
+        let row = &h.decisions()[0];
+        assert_eq!((row.mode.as_str(), row.applied, row.model.clone()), ("solar", false, None));
+    }
+
+    #[tokio::test]
     async fn early_evening_waiting_asks_again_at_the_agents_recheck() {
         let h = Harness::new(true);
         let agent = FakeAgent::new(vec![plan("solar", 30.0, 40.0), plan("sbg", 30.0, 60.0)], vec![]);
         let mut memory = night_memory();
         let engine = h.engine(&agent);
-        night_tick(&engine, &mut memory, &reading(85.0, SOLAR_MODE, 900.0), &ctx(at(26, 18, 30))).await;
+        night_tick(&engine, &mut memory, &reading(85.0, SOLAR_MODE, 900.0), &quiet_nights(at(26, 18, 30))).await;
         assert_eq!(memory.night.next_check_at, Some(at(26, 19, 10)));
-        night_tick(&engine, &mut memory, &reading(85.0, SOLAR_MODE, 500.0), &ctx(at(26, 19, 10))).await;
+        night_tick(&engine, &mut memory, &reading(85.0, SOLAR_MODE, 500.0), &quiet_nights(at(26, 19, 10))).await;
         assert_eq!(agent.night_calls.load(Ordering::SeqCst), 2);
         assert_eq!(memory.night.effective_mode, Some(SBG_MODE));
     }
