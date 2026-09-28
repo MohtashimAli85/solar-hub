@@ -4,7 +4,7 @@ use inverter::client::{SolarClient, SolarCredentials};
 use inverter::InverterState;
 use state::AppState;
 use tauri::Manager;
-use storage::{get_solar_password, load_app_settings, load_automation_config, load_energy_config};
+use storage::{get_solar_password, load_app_settings, load_automation_config, load_energy_config, load_remote_config};
 use tracing_appender::non_blocking::WorkerGuard;
 
 pub mod automation;
@@ -13,6 +13,7 @@ pub mod energy;
 pub mod events;
 pub mod inverter;
 pub mod notifications;
+pub mod remote;
 pub mod state;
 pub mod storage;
 
@@ -93,6 +94,15 @@ pub fn run() {
                 automation: automation.clone(),
             });
 
+            let remote = remote::RemoteState::new(load_remote_config(&handle).unwrap_or_default());
+            app.manage(remote.clone());
+            let remote_app = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if remote.enabled().await {
+                    remote.start(&remote_app).await;
+                }
+            });
+
             energy::runner::spawn(energy, client.clone(), handle.clone());
             automation::runner::spawn(automation, client, battery, notifier, handle.clone());
             Ok(())
@@ -133,6 +143,9 @@ pub fn run() {
             energy::commands::set_bill_reading,
             energy::commands::set_active_meter,
             energy::commands::set_standby_watts,
+            remote::commands::get_remote_status,
+            remote::commands::set_remote_enabled,
+            remote::commands::regenerate_remote_pin,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

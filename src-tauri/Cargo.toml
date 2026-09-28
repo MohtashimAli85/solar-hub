@@ -21,7 +21,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 reqwest = { version = "0.12", features = ["json"] }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "process", "net"] }
 futures-util = "0.3"
 md-5 = "0.10"
 hmac = "0.12"
@@ -40,6 +40,8 @@ uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 tracing-appender = "0.2"
+axum = "0.8"
+local-ip-address = "0.6"
 
 [profile.release]
 codegen-units = 16

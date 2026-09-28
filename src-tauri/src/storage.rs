@@ -5,6 +5,7 @@ use tauri_plugin_store::StoreExt as _;
 
 use crate::automation::config::AutomationConfig;
 use crate::energy::EnergyConfig;
+use crate::remote::RemoteConfig;
 
 const SETTINGS_STORE: &str = "settings.json";
 const AUTOMATION_STORE: &str = "automation.json";
@@ -91,6 +92,21 @@ pub fn save_energy_config(app: &AppHandle, config: &EnergyConfig) -> Result<(), 
         .store(SETTINGS_STORE)
         .map_err(|error| error.to_string())?;
     store.set("energy", json!(config));
+    store.save().map_err(|error| error.to_string())
+}
+
+pub fn load_remote_config(app: &AppHandle) -> Option<RemoteConfig> {
+    app.store(SETTINGS_STORE)
+        .ok()
+        .and_then(|store| store.get("remote"))
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+pub fn save_remote_config(app: &AppHandle, config: &RemoteConfig) -> Result<(), String> {
+    let store = app
+        .store(SETTINGS_STORE)
+        .map_err(|error| error.to_string())?;
+    store.set("remote", json!(config));
     store.save().map_err(|error| error.to_string())
 }
 
