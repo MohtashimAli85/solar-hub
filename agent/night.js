@@ -52,6 +52,36 @@ function smartLoadSection(smart) {
   return `Smart load is currently ${state}. It is ${smart.season}: choose when to enable it tonight (cutting heavy and non-UPS loads), between ${smart.earliest} and ${smart.latest}. Enable it earlier when the battery needs protecting — a warm night with heavy cooling loads, a busy household, a tight reserve, or a long night ahead; later when the night is cool and the battery has room. The controller enables it by ${smart.latest} at the latest.`;
 }
 
+function recentNightsSection(nights) {
+  if (!nights || nights.length === 0) return "No earlier nights recorded yet.";
+  return lines(
+    nights,
+    (night) => {
+      const battery = night.battery_from
+        ? `on battery ${night.battery_from}–${night.battery_until ?? "?"} from ${n(night.soc_at_battery_start, "%")}, evening draw ${n(night.evening_draw_a, " A", 1)}, sleeping draw ${n(night.sleep_draw_a, " A", 1)}`
+        : "not on battery";
+      const next = night.next_day_full_at
+        ? `next day full by ${night.next_day_full_at}`
+        : night.next_day_max_soc != null
+          ? `next day peaked at ${n(night.next_day_max_soc, "%")}`
+          : "next day not recorded";
+      return `- ${night.night}: ${battery}; lowest ${n(night.lowest_soc, "%")}, morning ${n(night.morning_soc, "%")}; ${next}.`;
+    },
+    "No earlier nights recorded yet.",
+  );
+}
+
+function eveningSection(input) {
+  if (!input.before_usual_start) return "";
+  const waiting =
+    input.sunrise_soc_if_waiting == null
+      ? ""
+      : ` If you wait until ${input.usual_night_start} and then run on battery for the rest of the night, it still holds about ${n(input.sunrise_soc_if_waiting, "%")} at sunrise (the floor is ${input.floor_soc}%). Whatever that leaves above the reserve you want is battery that goes unused unless you start earlier; if it's at or below that reserve, waiting is right.`;
+  return `It is the evening, before the usual night start at ${input.usual_night_start}.${waiting} You may start the battery early — choose "sbg" now — when the battery is high (around 80–90% or more), the projection below shows it can carry the busy evening (usually 10–20 A until bedtime) and then the quiet night (around 4 A) down to a sensible reserve, and ${input.coming_day}'s sun looks able to refill it. Look at how recent nights went: if they reached the morning with plenty left and the next day still filled the battery, starting earlier is the better use of it. Otherwise choose "solar" and a recheck_minutes that brings you back later this evening; the controller asks again by ${input.usual_night_start} at the latest.
+
+`;
+}
+
 export function buildPrompt(input) {
   const usable = Math.max(input.soc - input.floor_soc, 0);
   const onBattery = input.on_battery
@@ -68,7 +98,7 @@ export function buildPrompt(input) {
 - Typical load at this hour: ${n(input.typical_load_now_w, " W")} (right now it is ${n(input.load_w, " W")}).
 - The house usually goes quiet by: ${input.quiet_by ?? "no clear drop found"}.
 - Typical load for the rest of tonight:
-${lines(input.typical_hourly_load, (h) => `  ${h.hour} ${n(h.load_w, " W")}`, "  (none)")}`
+${lines(input.typical_hourly_load, (h) => `  ${h.hour} ${n(h.load_w, " W")} (≈${n(h.draw_a, " A", 1)} from the battery)`, "  (none)")}`
       : `No household history recorded yet. Infer the routine from the time and the current load (a household is usually most active in the evening and quieter after bedtime), and prefer a shorter recheck so the measured draw can correct you.`;
 
   return `Night decision for ${input.month}, latitude ${input.latitude}°. It is ${input.now}. At night "sbg" means the house runs from the battery; "solar" means the grid powers it and the battery is kept.
@@ -85,8 +115,11 @@ Battery now:
 - Sunrise ${input.sunrise}; ${n(input.hours_until_sunrise, " h", 1)} until the sun can take over again (including ramp-up).
 - Each hour of backup at the typical sleeping load costs about ${n(input.soc_per_backup_hour, "% SOC", 1)}.
 
-Household routine:
+${eveningSection(input)}Household routine:
 ${routine}
+
+How recent nights went (battery use, draw, and whether the next day's sun refilled it):
+${recentNightsSection(input.recent_nights)}
 
 Projected SOC if the house stays on battery from now (${input.trajectory_basis === "history" ? "current load for this hour, then the learned routine" : "assuming today's current load all night"} — use these numbers, don't redo the arithmetic):
 ${lines(input.trajectory, (p) => `  ${p.time} ${n(p.soc, "%")}`, "  (not available)")}

@@ -59,7 +59,7 @@ export function TonightCard({ insights }: { insights: AutomationInsights }) {
     <Card>
       <CardHeader className="gap-3">
         <SectionTitle
-          eyebrow={preview ? `Preview · plan is made at ${clock(insights.night_start)}` : "Tonight"}
+          eyebrow={preview ? `Preview · planning starts at sunset, ${clock(insights.sunset)}` : "Tonight"}
           title={preview ? "How tonight could go on battery" : "Battery through the night"}
           aside={<SeriesKey measured={!preview} />}
         />

@@ -89,6 +89,22 @@ pub struct PreviousPlan {
 pub struct HourLoadRow {
     pub hour: String,
     pub load_w: f64,
+    /// The same load as battery current, if the house ran on battery.
+    pub draw_a: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NightOutcomeRow {
+    pub night: String,
+    pub battery_from: Option<String>,
+    pub soc_at_battery_start: Option<f64>,
+    pub battery_until: Option<String>,
+    pub lowest_soc: Option<f64>,
+    pub morning_soc: Option<f64>,
+    pub evening_draw_a: Option<f64>,
+    pub sleep_draw_a: Option<f64>,
+    pub next_day_full_at: Option<String>,
+    pub next_day_max_soc: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,6 +190,15 @@ pub struct NightInput {
     pub outages: Vec<OutageRow>,
     pub weather: Option<WeatherBrief>,
     pub smart_load: SmartLoadBrief,
+    /// The usual night start (HH:MM). Before it the battery may start early,
+    /// but only when it can easily carry the evening and the night.
+    pub usual_night_start: String,
+    pub before_usual_start: bool,
+    /// Before the usual start: the SOC left at sunrise if the battery waits for
+    /// the usual start and then runs the rest of the night. Well above the
+    /// reserve means waiting leaves battery unused.
+    pub sunrise_soc_if_waiting: Option<f64>,
+    pub recent_nights: Vec<NightOutcomeRow>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

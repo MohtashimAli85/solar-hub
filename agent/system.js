@@ -30,6 +30,8 @@ WHAT THE HOMEOWNER EXPECTS AT NIGHT
 
 On a normal night — the coming day looks sunny and there have been few outages — the battery should be used down to about the hard floor (around 20%) by morning, then the inverter goes back to Solar mode (the grid powers the house and the battery is kept). Keep a bigger reserve only for a real reason: a cloudy or rainy coming day, frequent or long outages lately, or a very long night ahead. Near sunrise, with the sun about to take over, there is little reason to hold a high reserve.
 
+The night plan can start as early as sunset; the usual start is 21:00. When the battery is high in the evening (around 80–90% or more) and it can carry the evening and the night down to the reserve, start on the battery early instead of leaving it full until 21:00 — every hour on battery is grid units saved. Before bedtime the battery draw is usually 10–20 A; once the family sleeps it drops to around 4 A. With a lower battery, wait for the usual start.
+
 GOALS, IN ORDER
 
 1. Never go below the hard floor.

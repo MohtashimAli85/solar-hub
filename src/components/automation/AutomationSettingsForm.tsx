@@ -115,7 +115,7 @@ export function AutomationSettingsForm({ config, saving, testing, onSave, onTest
         <CardContent className="space-y-5">
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
             <div className="space-y-1.5">
-              <Label htmlFor="night-start">Night starts at</Label>
+              <Label htmlFor="night-start">Usual night start</Label>
               <Select
                 id="night-start"
                 value={form.night_start_hour}
@@ -128,7 +128,8 @@ export function AutomationSettingsForm({ config, saving, testing, onSave, onTest
                 ))}
               </Select>
               <p className="text-[11px] leading-snug text-muted-foreground">
-                Before this the inverter stays in Solar mode (the grid carries the evening); the battery plan starts here.
+                The battery plan normally starts here. From sunset the agent may start earlier, when the battery is at least 60%
+                and waiting would leave charge unused by sunrise. Smart load and the oven boost still follow this time.
               </p>
             </div>
             <NumberField

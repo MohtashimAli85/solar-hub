@@ -66,11 +66,39 @@ Automation only switches between **Solar** and **SBG**.
 
 The day is split into two windows:
 
-- **Night** runs from the night start (21:00 by default, adjustable from
-  17:00 to 23:00) until sunrise plus the **sunrise buffer** (1 hour by
-  default). The panels can't carry the house right at sunrise, so the night
+- **Night** runs from sunset until sunrise plus the **sunrise buffer** (1 hour
+  by default). The panels can't carry the house right at sunrise, so the night
   plan keeps running until they can.
-- **Day** runs from then until the night start.
+- **Day** runs from then until sunset.
+
+The **usual night start** (21:00 by default, adjustable from 17:00 to 23:00)
+is when the battery plan normally begins. Between sunset and then, the
+battery can start early (see below). Smart load and the oven boost still go
+by the usual start.
+
+### Evening: starting the battery early
+
+A 100 Ah pack loses about 15–18% an hour to the busy evening (10–20 A before
+bedtime), but only about 4% an hour once the family sleeps (around 4 A).
+Starting at 21:00 with a full battery can leave a lot unused by sunrise, and
+battery left unused is grid units that weren't saved. So from sunset:
+
+- With the battery below **60%**, the agent isn't asked. The house stays in
+  Solar mode until the usual start.
+- Otherwise the agent gets the projection and one extra number: **how much
+  the battery would still hold at sunrise if it waited** for the usual start.
+  If that's well above the reserve it wants, it starts the battery now. If
+  not, it waits in Solar mode and checks again later in the evening.
+
+To do this better over time it also sees **how the last 7 nights went**:
+
+- when the battery ran, and from what SOC
+- the evening and sleeping draw in amps
+- the lowest and morning SOC
+- whether the next day's sun still filled the battery
+
+This comes from the same `samples/` records, so it improves as nights are
+recorded.
 
 ### Night: a battery budget, not a yes/no
 
@@ -137,7 +165,9 @@ inverter's limit once the load stops. Then:
 - If the battery will be full, **SBG** is fine.
 - If it clearly won't (little or no sun), it switches to **Solar**, so the
   grid carries the house and every bit of solar goes into the battery.
-- After sunset nothing can charge the battery, so 18:00–21:00 runs in Solar mode, with the grid carrying the house.
+- In the last hour before sunset with no sun left, it goes to Solar mode.
+  From sunset the night plan takes over (see
+  [Evening](#evening-starting-the-battery-early)).
 
 SBG during the day only makes sense while the sun is actually charging the
 battery. If the battery is being drained on SBG (or, in dry run, *would* be),

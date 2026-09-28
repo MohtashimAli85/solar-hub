@@ -8,11 +8,15 @@ use serde::Serialize;
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const SAMPLE_HEADER: &str = "timestamp,soc_pct,load_w,pv_w,battery_a,battery_v,grid_on,grid_basis,mode,source";
 const DECISION_HEADER: &str = "timestamp,window,mode,reserve_soc,recheck_minutes,confidence,dry_run,applied,reason";
-const NIGHT_HOURS: [u32; 14] = [18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7];
+const NIGHT_HOURS: [u32; 15] = [17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7];
 const DAY_HOURS: [u32; 14] = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 const MIN_HOURS_FOR_A_NIGHT: usize = 3;
 const FULL_SOC: f64 = 95.0;
 const OUTAGE_GAP_MINUTES: i64 = 60;
+/// A sample counts as "on battery" when the inverter is on SBG and the BMS
+/// shows at least this much discharge.
+const ON_BATTERY_A: f64 = 1.0;
+const SLEEP_HOURS: std::ops::Range<u32> = 0..6;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sample {
@@ -231,11 +235,11 @@ fn parse_decision(line: &str) -> Option<DecisionRow> {
     })
 }
 
-/// Evening hours belong to that date's night; early-morning hours to the
+/// Evening hours (from 17:00) belong to that date's night; early-morning hours to the
 /// previous date's night; midday belongs to no night.
 pub fn night_key(at: NaiveDateTime) -> Option<NaiveDate> {
     match at.hour() {
-        18..=23 => Some(at.date()),
+        17..=23 => Some(at.date()),
         0..=7 => at.date().pred_opt(),
         _ => None,
     }
@@ -442,6 +446,62 @@ pub fn daily_solar(samples: &[Sample], today: NaiveDate, days: i64) -> Vec<DaySo
         .collect()
 }
 
+/// How one recorded night actually went on battery, so the agent can see
+/// whether earlier starts and reserves worked out.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NightOutcome {
+    pub night: NaiveDate,
+    pub battery_from: Option<NaiveDateTime>,
+    pub soc_at_battery_start: Option<f64>,
+    pub battery_until: Option<NaiveDateTime>,
+    pub lowest_soc: Option<f64>,
+    pub morning_soc: Option<f64>,
+    /// Mean battery draw while on battery in the evening (17:00–23:59).
+    pub evening_draw_a: Option<f64>,
+    /// Mean battery draw while on battery after midnight (00:00–05:59).
+    pub sleep_draw_a: Option<f64>,
+}
+
+fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let (sum, count) = values.fold((0.0, 0usize), |(sum, count), value| (sum + value, count + 1));
+    (count > 0).then(|| sum / count as f64)
+}
+
+/// The last `nights` recorded nights before `exclude_night`, newest first.
+pub fn night_outcomes(samples: &[Sample], exclude_night: NaiveDate, nights: usize) -> Vec<NightOutcome> {
+    let mut by_night: std::collections::BTreeMap<NaiveDate, Vec<&Sample>> = std::collections::BTreeMap::new();
+    for sample in samples {
+        if let Some(night) = night_key(sample.at).filter(|night| *night < exclude_night) {
+            by_night.entry(night).or_default().push(sample);
+        }
+    }
+    by_night
+        .into_iter()
+        .rev()
+        .take(nights)
+        .map(|(night, samples)| {
+            let battery: Vec<&Sample> = samples
+                .iter()
+                .copied()
+                .filter(|s| s.mode.as_deref() == Some("SBG") && s.battery_a.is_some_and(|amps| amps < -ON_BATTERY_A))
+                .collect();
+            let draw = |hours: &dyn Fn(u32) -> bool| {
+                mean(battery.iter().filter(|s| hours(s.at.hour())).filter_map(|s| s.battery_a.map(|amps| -amps)))
+            };
+            NightOutcome {
+                night,
+                battery_from: battery.first().map(|s| s.at),
+                soc_at_battery_start: battery.first().and_then(|s| s.soc),
+                battery_until: battery.last().map(|s| s.at),
+                lowest_soc: samples.iter().filter_map(|s| s.soc).reduce(f64::min),
+                morning_soc: samples.iter().rev().find_map(|s| s.soc),
+                evening_draw_a: draw(&|hour| hour >= 17),
+                sleep_draw_a: draw(&|hour| SLEEP_HOURS.contains(&hour)),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +645,44 @@ mod tests {
         assert_eq!(days[0].full_at, NaiveTime::from_hms_opt(13, 30, 0));
         assert_eq!(days[0].max_soc, Some(100.0));
         assert_eq!(days[1].full_at, None);
+    }
+
+    fn battery_sample(when: NaiveDateTime, soc: f64, amps: f64, mode: &str) -> Sample {
+        Sample {
+            at: when,
+            soc: Some(soc),
+            load_w: Some(amps.abs() * 25.0),
+            pv_w: Some(0.0),
+            battery_a: Some(amps),
+            battery_v: Some(26.0),
+            grid_on: Some(true),
+            grid_basis: "ac_input".into(),
+            mode: Some(mode.into()),
+            source: "inverter+bms".into(),
+        }
+    }
+
+    #[test]
+    fn night_outcomes_describe_when_the_battery_ran_and_how_hard() {
+        let samples = vec![
+            battery_sample(at(26, 18, 0), 95.0, 0.5, "Solar"),
+            battery_sample(at(26, 19, 30), 94.0, -14.0, "SBG"),
+            battery_sample(at(26, 22, 0), 80.0, -16.0, "SBG"),
+            battery_sample(at(27, 2, 0), 55.0, -4.0, "SBG"),
+            battery_sample(at(27, 4, 0), 48.0, -4.2, "SBG"),
+            battery_sample(at(27, 5, 30), 46.0, -0.8, "Solar"),
+            battery_sample(at(27, 19, 0), 90.0, -12.0, "SBG"),
+        ];
+        let outcomes = night_outcomes(&samples, at(27, 0, 0).date(), 7);
+        assert_eq!(outcomes.len(), 1, "tonight is left out");
+        let night = &outcomes[0];
+        assert_eq!(night.night, at(26, 0, 0).date());
+        assert_eq!(night.battery_from, Some(at(26, 19, 30)));
+        assert_eq!(night.soc_at_battery_start, Some(94.0));
+        assert_eq!(night.battery_until, Some(at(27, 4, 0)));
+        assert_eq!(night.lowest_soc, Some(46.0));
+        assert_eq!(night.morning_soc, Some(46.0));
+        assert!((night.evening_draw_a.unwrap() - 15.0).abs() < 1e-9);
+        assert!((night.sleep_draw_a.unwrap() - 4.1).abs() < 1e-9);
     }
 }

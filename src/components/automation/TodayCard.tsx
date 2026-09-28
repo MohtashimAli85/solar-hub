@@ -31,7 +31,7 @@ export function TodayCard({ insights }: { insights: AutomationInsights }) {
   const afterSunset = day.method === "after_sunset";
   const fills = day.soc_at_sunset >= 99.5;
   const verdict = afterSunset
-    ? `Sun has set · Solar mode until ${clock(insights.night_start)}`
+    ? "Sun has set · the night plan takes over"
     : fills
       ? `Full by ~${clock(day.full_at)} — battery mode (SBG) is fine`
       : `Won't fill (≈ ${Math.round(day.soc_at_sunset)}% at sunset) — charging on Solar`;
