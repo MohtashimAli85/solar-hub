@@ -3,10 +3,13 @@ import SunCalc from "suncalc";
 
 const MODEL = "gemini-3.5-flash-lite";
 
+// SunCalc picks the day whose solar noon is nearest, so just after midnight
+// it still returns yesterday. Asking at local noon pins the calendar day.
 export function sunInfo(lat, lon, date) {
-  const tomorrow = new Date(date.getTime() + 24 * 60 * 60 * 1000);
-  const today = SunCalc.getTimes(date, lat, lon);
-  const nextDay = SunCalc.getTimes(tomorrow, lat, lon);
+  const noon = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12);
+  const nextNoon = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1, 12);
+  const today = SunCalc.getTimes(noon, lat, lon);
+  const nextDay = SunCalc.getTimes(nextNoon, lat, lon);
   const altitudeDeg = (SunCalc.getPosition(date, lat, lon).altitude * 180) / Math.PI;
   return {
     today: { sunrise: today.sunrise.toISOString(), sunset: today.sunset.toISOString() },

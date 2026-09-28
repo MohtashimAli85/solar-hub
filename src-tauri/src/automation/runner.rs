@@ -128,6 +128,27 @@ struct Clock {
 }
 
 impl Clock {
+    /// Pins sunrise/sunset to today's and tomorrow's calendar dates. The sun
+    /// times only move a minute or so a day, but a stale day (yesterday's
+    /// sunrise just after midnight) would make the whole night look like day.
+    fn for_today(
+        now: NaiveDateTime,
+        sunrise: NaiveDateTime,
+        sunset: NaiveDateTime,
+        next_sunrise: NaiveDateTime,
+        night_start_hour: u32,
+    ) -> Self {
+        let today = now.date();
+        let tomorrow = today.succ_opt().unwrap_or(today);
+        Self {
+            now,
+            sunrise_today: today.and_time(sunrise.time()),
+            sunset_today: today.and_time(sunset.time()),
+            sunrise_tomorrow: tomorrow.and_time(next_sunrise.time()),
+            night_start_hour,
+        }
+    }
+
     fn night_start_on(&self, date: NaiveDate) -> NaiveDateTime {
         date.and_hms_opt(self.night_start_hour, 0, 0).unwrap_or(self.now)
     }
@@ -644,13 +665,7 @@ async fn tick(
         .await;
 
     refresh_weather(memory, services.weather_http, latitude, longitude).await;
-    let clock = Clock {
-        now,
-        sunrise_today,
-        sunset_today,
-        sunrise_tomorrow,
-        night_start_hour: config.night_start_hour,
-    };
+    let clock = Clock::for_today(now, sunrise_today, sunset_today, sunrise_tomorrow, config.night_start_hour);
     let samples = state.history.recent_samples(now.date());
     let ctx = Context::build(clock, latitude, samples, usable_forecast(memory, latitude, longitude), config);
 
@@ -1962,6 +1977,16 @@ mod tests {
         assert_eq!(clock(at(26, 21, 0)).window(), Window::Night);
         assert_eq!(clock(at(26, 5, 0)).window(), Window::Night);
         assert_eq!(clock(at(26, 6, 0)).window(), Window::Day);
+    }
+
+    #[test]
+    fn yesterdays_sun_times_just_after_midnight_still_mean_night() {
+        let c = Clock::for_today(at(28, 0, 4), at(27, 5, 55), at(27, 17, 55), at(28, 5, 55), 21);
+        assert_eq!(c.sunrise_today, at(28, 5, 55));
+        assert_eq!(c.window(), Window::Night, "this is the bug that ran the house on grid all night");
+        assert_eq!(c.next_sunrise(), at(28, 5, 55));
+        let morning = Clock::for_today(at(28, 7, 0), at(27, 5, 55), at(27, 17, 55), at(28, 5, 55), 21);
+        assert_eq!(morning.window(), Window::Day);
     }
 
     #[test]
