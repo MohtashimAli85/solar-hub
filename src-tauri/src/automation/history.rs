@@ -55,11 +55,11 @@ impl HistoryStore {
         &self.root
     }
 
-    fn month_file(&self, kind: &str, date: NaiveDate) -> PathBuf {
+    pub(crate) fn month_file(&self, kind: &str, date: NaiveDate) -> PathBuf {
         self.root.join(kind).join(format!("{:04}-{:02}.csv", date.year(), date.month()))
     }
 
-    fn append(&self, kind: &str, header: &str, date: NaiveDate, line: &str) -> std::io::Result<()> {
+    pub(crate) fn append(&self, kind: &str, header: &str, date: NaiveDate, line: &str) -> std::io::Result<()> {
         let path = self.month_file(kind, date);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -80,7 +80,7 @@ impl HistoryStore {
         self.append("decisions", DECISION_HEADER, row.at.date(), &decision_to_csv(row))
     }
 
-    fn read_lines(&self, kind: &str, date: NaiveDate) -> Vec<String> {
+    pub(crate) fn read_lines(&self, kind: &str, date: NaiveDate) -> Vec<String> {
         fs::read_to_string(self.month_file(kind, date))
             .map(|text| text.lines().skip(1).map(str::to_owned).collect())
             .unwrap_or_default()
@@ -113,15 +113,15 @@ impl HistoryStore {
     }
 }
 
-fn previous_month(date: NaiveDate) -> NaiveDate {
+pub(crate) fn previous_month(date: NaiveDate) -> NaiveDate {
     date.with_day(1).and_then(|first| first.pred_opt()).unwrap_or(date)
 }
 
-fn num(value: Option<f64>, digits: usize) -> String {
+pub(crate) fn num(value: Option<f64>, digits: usize) -> String {
     value.map(|v| format!("{v:.digits$}")).unwrap_or_default()
 }
 
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     let flat = text.replace(['\n', '\r'], " ");
     if flat.contains([',', '"']) {
         format!("\"{}\"", flat.replace('"', "\"\""))
@@ -161,7 +161,7 @@ fn decision_to_csv(row: &DecisionRow) -> String {
     .join(",")
 }
 
-fn split_csv_line(line: &str) -> Vec<String> {
+pub(crate) fn split_csv_line(line: &str) -> Vec<String> {
     let mut fields = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
@@ -181,7 +181,7 @@ fn split_csv_line(line: &str) -> Vec<String> {
     fields
 }
 
-fn opt_f64(text: &str) -> Option<f64> {
+pub(crate) fn opt_f64(text: &str) -> Option<f64> {
     text.trim().parse().ok().filter(|v: &f64| v.is_finite())
 }
 

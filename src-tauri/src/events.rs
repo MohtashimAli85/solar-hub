@@ -2,6 +2,7 @@ pub const BATTERY_SNAPSHOT: &str = "battery://snapshot";
 pub const BATTERY_CONNECTION: &str = "battery://connection";
 pub const INVERTER_SNAPSHOT: &str = "inverter://snapshot";
 pub const AUTOMATION_STATUS: &str = "automation://status";
+pub const ENERGY_UPDATED: &str = "energy://updated";
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};

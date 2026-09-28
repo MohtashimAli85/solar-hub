@@ -4,11 +4,12 @@ use inverter::client::{SolarClient, SolarCredentials};
 use inverter::InverterState;
 use state::AppState;
 use tauri::Manager;
-use storage::{get_solar_password, load_app_settings, load_automation_config};
+use storage::{get_solar_password, load_app_settings, load_automation_config, load_energy_config};
 use tracing_appender::non_blocking::WorkerGuard;
 
 pub mod automation;
 pub mod battery;
+pub mod energy;
 pub mod events;
 pub mod inverter;
 pub mod notifications;
@@ -75,13 +76,15 @@ pub fn run() {
                 .document_dir()
                 .unwrap_or_else(|_| std::env::temp_dir())
                 .join("Solar Hub");
-            let automation =
-                AutomationState::new(automation_config, automation::history::HistoryStore::new(records_root));
+            let history = automation::history::HistoryStore::new(records_root);
+            let energy = energy::EnergyState::new(load_energy_config(&handle), history.clone());
+            let automation = AutomationState::new(automation_config, history);
 
             app.manage(inverter.clone());
             app.manage(battery.clone());
             app.manage(automation.clone());
             app.manage(notifier.clone());
+            app.manage(energy.clone());
             battery::manager::spawn_disconnect_watcher(battery.clone(), handle.clone());
             battery::manager::spawn_reconnect_loop(battery.clone(), handle.clone());
             app.manage(AppState {
@@ -90,6 +93,7 @@ pub fn run() {
                 automation: automation.clone(),
             });
 
+            energy::runner::spawn(energy, client.clone(), handle.clone());
             automation::runner::spawn(automation, client, battery, notifier, handle.clone());
             Ok(())
         })
@@ -125,6 +129,10 @@ pub fn run() {
             automation::commands::get_automation_decisions,
             automation::commands::open_records_folder,
             automation::commands::send_test_notification,
+            energy::commands::get_energy_summary,
+            energy::commands::set_bill_reading,
+            energy::commands::set_active_meter,
+            energy::commands::set_standby_watts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

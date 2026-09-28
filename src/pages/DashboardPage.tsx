@@ -1,5 +1,6 @@
 import { AutomationSummaryCard } from "@/components/dashboard/AutomationSummaryCard";
 import { CommandHero } from "@/components/dashboard/CommandHero";
+import { UnitsCard } from "@/components/dashboard/UnitsCard";
 import { OutputSourcePanel } from "@/components/inverter/OutputSourcePanel";
 import { useAutomation } from "@/hooks/useAutomation";
 import { useBatteryDevice } from "@/hooks/useBatteryDevice";
@@ -47,6 +48,8 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
           <AutomationSummaryCard status={automation.status} onOpen={onOpenAutomation} />
         </div>
       </div>
+
+      <UnitsCard />
     </div>
   );
 }

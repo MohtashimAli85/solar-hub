@@ -297,3 +297,60 @@ export const TZ_PRESETS = [
   "Asia/Riyadh",
   "Asia/Kolkata",
 ];
+export interface GridSplit {
+  grid_kwh: number;
+  meter1_kwh: number;
+  meter2_kwh: number;
+  unassigned_kwh: number;
+}
+
+export interface DayUnits extends GridSplit {
+  date: string;
+  house_kwh: number;
+  solar_kwh: number;
+  battery_kwh: number;
+  grid_off_minutes: number;
+  data_hours: number;
+  standby_kwh: number;
+}
+
+export interface HourUnits {
+  hour: number;
+  grid_kwh: number;
+  house_kwh: number;
+  solar_kwh: number;
+  battery_kwh: number;
+}
+
+export interface BillPeriod {
+  start: string;
+  end: string;
+  days_total: number;
+  days_with_data: number;
+  so_far: GridSplit;
+  standby_kwh: number;
+  log_hours: number;
+  elapsed_hours: number;
+  projected: GridSplit | null;
+}
+
+export type MeterNumber = 1 | 2;
+
+export interface EnergySummary {
+  configured: boolean;
+  today: DayUnits | null;
+  today_hourly: HourUnits[];
+  yesterday: DayUnits | null;
+  recent_days: DayUnits[];
+  bill: BillPeriod | null;
+  previous_bill: BillPeriod | null;
+  bill_reading_day: number;
+  bill_reading_time: string;
+  standby_w: number;
+  active_meter: MeterNumber | null;
+  active_since: string | null;
+  updated_at: string | null;
+  error: string | null;
+  backfill: { done: number; total: number } | null;
+  records_dir: string;
+}

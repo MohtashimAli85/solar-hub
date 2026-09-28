@@ -17,6 +17,22 @@ use super::InverterError;
 
 const API_BASE: &str = "https://solar.siseli.com";
 const ENERGY_FLOW_MAX_AGE: Duration = Duration::from_secs(120);
+const HISTORY_ENDPOINT: &str = "/apis/deviceState/simple/attribute/keys/history/v1";
+const HISTORY_PAGE_SIZE: u32 = 1500;
+const HISTORY_MAX_PAGES: u32 = 5;
+const LOGGED_RESPONSE_CHARS: usize = 2000;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryPoint {
+    pub at: DateTime<Utc>,
+    pub values: BTreeMap<String, Option<f64>>,
+}
+
+impl HistoryPoint {
+    pub fn value(&self, key: &str) -> Option<f64> {
+        self.values.get(key).copied().flatten()
+    }
+}
 
 /// Picks the energy-flow payload to ship: the fresh one, else a cached copy
 /// young enough to still describe the house (flagged stale).
@@ -81,6 +97,14 @@ impl SolarClient {
 
     pub async fn credentials(&self) -> SolarCredentials {
         self.credentials.lock().await.clone()
+    }
+
+    pub async fn time_zone(&self) -> Tz {
+        self.credentials()
+            .await
+            .time_zone_or_default()
+            .parse()
+            .unwrap_or(chrono_tz::Asia::Karachi)
     }
 
     pub fn is_configured(&self) -> bool {
@@ -209,9 +233,9 @@ impl SolarClient {
                 eprintln!("[inverter] {endpoint} returned non-JSON response (status {status})");
                 InverterError::Api(format!("{endpoint} returned non-JSON response"))
             })?;
-            eprintln!("[inverter] {endpoint} response: {data}");
+            eprintln!("[inverter] {endpoint} response: {}", clip(data.to_string(), LOGGED_RESPONSE_CHARS));
             if is_token_expired(&data) {
-                eprintln!("[inverter] {endpoint} token expired (code 9), clearing token");
+                eprintln!("[inverter] {endpoint} token rejected, clearing token");
                 *self.token.lock().await = None;
                 if !retried {
                     retried = true;
@@ -626,6 +650,41 @@ impl SolarClient {
         self.read_inverter_settings(&device_id).await
     }
 
+    /// Logged values between `from` and `to`, oldest first, from the portal's
+    /// Data Analysis history.
+    pub async fn read_attribute_history(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        keys: &[&str],
+    ) -> Result<Vec<HistoryPoint>, InverterError> {
+        let device_id = self.resolve_device_id(None).await?;
+        let from_time = self.solar_time(from)?;
+        let to_time = self.solar_time(to)?;
+        let mut points = Vec::new();
+        let mut page = 1;
+        loop {
+            let body = json!({
+                "deviceId": device_id,
+                "count": HISTORY_PAGE_SIZE,
+                "page": page,
+                "fromTime": from_time,
+                "toTime": to_time,
+                "orderByTimeAsc": true,
+                "keys": keys,
+            });
+            let data = self.solar_request(HISTORY_ENDPOINT, Method::POST, body).await?;
+            let (mut batch, pages) = parse_attribute_history(&data);
+            let empty = batch.is_empty();
+            points.append(&mut batch);
+            if empty || page >= pages || page >= HISTORY_MAX_PAGES {
+                break;
+            }
+            page += 1;
+        }
+        Ok(points)
+    }
+
     pub async fn read_device_details(
         &self,
         device_id: Option<String>,
@@ -695,8 +754,45 @@ fn ensure_code_ok(data: &Value) -> Result<(), InverterError> {
     }
 }
 
+fn parse_attribute_history(data: &Value) -> (Vec<HistoryPoint>, u32) {
+    let body = data.get("data").unwrap_or(&Value::Null);
+    let pages = body.get("total").and_then(Value::as_u64).unwrap_or(1) as u32;
+    let payload = body.get("payload").unwrap_or(&Value::Null);
+    let fields = payload.get("fields").and_then(Value::as_object);
+    let points = payload
+        .get("timeSeries")
+        .and_then(Value::as_array)
+        .map(|times| {
+            times
+                .iter()
+                .enumerate()
+                .filter_map(|(index, time)| {
+                    let at = DateTime::parse_from_rfc3339(time.as_str()?).ok()?.with_timezone(&Utc);
+                    let values = fields
+                        .map(|fields| {
+                            fields
+                                .iter()
+                                .map(|(key, series)| (key.clone(), series.get(index).and_then(parse_f64)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some(HistoryPoint { at, values })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (points, pages)
+}
+
+fn clip(text: String, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        Some((end, _)) => format!("{}… ({} bytes)", &text[..end], text.len()),
+        None => text,
+    }
+}
+
 fn is_token_expired(data: &Value) -> bool {
-    data.get("code").and_then(Value::as_i64) == Some(9)
+    matches!(data.get("code").and_then(Value::as_i64), Some(8 | 9))
 }
 
 fn parse_mode(value: &Value, naming: fn(u32) -> String) -> String {
@@ -801,6 +897,46 @@ mod tests {
     }
 
     #[test]
+    fn history_response_parses_into_points() {
+        let data = json!({
+            "code": 0,
+            "data": {
+                "page": 1,
+                "count": 2,
+                "total": 1,
+                "payload": {
+                    "timeSeries": ["2026-09-20T19:04:59.590Z", "2026-09-20T19:09:59.932Z"],
+                    "fields": {
+                        "load_power": [0.147, 0.24],
+                        "acInputVoltage": [238.6, null]
+                    },
+                    "fieldInfo": null
+                }
+            }
+        });
+        let (points, pages) = parse_attribute_history(&data);
+        assert_eq!(pages, 1);
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].at.to_rfc3339(), "2026-09-20T19:04:59.590+00:00");
+        assert_eq!(points[0].value("load_power"), Some(0.147));
+        assert_eq!(points[1].value("acInputVoltage"), None);
+        assert_eq!(points[1].value("missing"), None);
+    }
+
+    #[test]
+    fn empty_history_payload_gives_no_points() {
+        let (points, pages) = parse_attribute_history(&json!({"code": 0, "data": {"total": 0, "payload": {}}}));
+        assert!(points.is_empty());
+        assert_eq!(pages, 0);
+    }
+
+    #[test]
+    fn clip_keeps_short_text_and_cuts_long_text() {
+        assert_eq!(clip("short".into(), 10), "short");
+        assert!(clip("x".repeat(50), 10).starts_with("xxxxxxxxxx…"));
+    }
+
+    #[test]
     fn solar_time_formats_with_offset() {
         let client = SolarClient::new(SolarCredentials {
             time_zone: "Asia/Karachi".to_string(),
@@ -823,8 +959,9 @@ mod tests {
     }
 
     #[test]
-    fn token_expired_detected_by_code_9() {
+    fn token_rejection_detected_by_code_8_or_9() {
         assert!(is_token_expired(&json!({"code": 9, "message": "Token expired"})));
+        assert!(is_token_expired(&json!({"code": 8, "message": "token error"})));
         assert!(!is_token_expired(&json!({"code": 0})));
         assert!(!is_token_expired(&json!({"code": 1, "message": "bad"})));
         assert!(!is_token_expired(&json!({"foo": 9})));

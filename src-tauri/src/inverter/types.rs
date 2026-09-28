@@ -40,7 +40,7 @@ pub struct DeviceDetails {
 
 pub const SOLAR_OUTPUT_MODE: u32 = 0;
 const SOLAR_MODE_DISCHARGE_LIMIT_A: f64 = 1.0;
-const MAINS_PRESENT_VOLTS: f64 = 100.0;
+pub(crate) const MAINS_PRESENT_VOLTS: f64 = 100.0;
 const LOAD_OVER_PV_MARGIN_W: f64 = 100.0;
 /// Share of the house's shortfall (load minus solar) the battery must carry
 /// before a Solar-mode draw counts as an outage; a small trickle while the

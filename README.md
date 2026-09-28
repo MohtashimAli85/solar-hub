@@ -12,7 +12,7 @@ JBD BMS over Bluetooth.
 
 | Tab | What it shows |
 |---|---|
-| **Dashboard** | Battery %, charge/discharge rate with a readable time estimate ("15% in ~8 min · around 6:15 AM", "Full in ~2 h 50 min"), solar, house load, grid status, output-source and smart-load controls, and a summary of what the automation is doing. |
+| **Dashboard** | Battery %, charge/discharge rate with a readable time estimate ("15% in ~8 min · around 6:15 AM", "Full in ~2 h 50 min"), solar, house load, grid status, output-source and smart-load controls, a summary of what the automation is doing, and electricity units taken from the grid, per meter. |
 | **Battery** | Pack health, cell voltages and balance, temperatures, protection flags and short trend charts from the BMS. |
 | **Inverter** | Live power flows (solar in, house load, grid), output source, device summary, advanced charger/cutoff settings and every raw field from the cloud. |
 | **Automation** | Tonight's plan and battery projection, the day check, the household routine it has learned, the weather outlook, recent outages, a log of every decision and why, the CSV records folder, and all automation settings. |
@@ -225,9 +225,17 @@ catching short outages.
 ~/Documents/Solar Hub/
 ├── samples/2026-09.csv     timestamp, soc_pct, load_w, pv_w, battery_a, battery_v,
 │                           grid_on, grid_basis, mode, source
-└── decisions/2026-09.csv   timestamp, window, mode, reserve_soc, recheck_minutes,
-                            confidence, dry_run, applied, reason
+├── decisions/2026-09.csv   timestamp, window, mode, reserve_soc, recheck_minutes,
+│                           confidence, dry_run, applied, reason
+└── energy/
+    ├── 2026-09.csv         date, grid_units, meter1_units, meter2_units,
+    │                       unassigned_units, house_kwh, solar_kwh, battery_kwh,
+    │                       grid_off_minutes, data_hours
+    └── meter-switches.csv  timestamp, meter
 ```
+
+`energy/` holds one row per finished day (today is shown in the app but only
+written once the day is over) and every changeover-switch change you record.
 
 Timestamps are local time (`YYYY-MM-DD HH:MM:SS`). `battery_a` is positive while
 charging and negative while discharging. These files are also where the agent
@@ -237,6 +245,64 @@ learns your routine and outage history from.
 `samples` (or `decisions`), **Combine & Load**, then **Refresh** whenever you
 want the newest rows. Don't open a CSV directly and save over it; Excel can
 rewrite the format while the app is still adding rows.
+
+## Electricity units
+
+The Dashboard's **Electricity units** card counts the units (1 unit = 1 kWh)
+the house takes from the grid. It doesn't use the app's own readings. It uses
+the inverter's own history from the Solar of Things cloud (the log behind the
+portal's Data Analysis tab): a reading every 5 minutes, or every minute or two
+while the app is open. So the count has no gaps when the Mac sleeps, and it
+can fill in past days.
+
+For each reading:
+
+- solar covers the house first, then the battery's discharge
+- only the rest counts as units, and only while the grid is up (AC input
+  ≥ 100 V)
+- during an outage nothing is counted
+
+Each reading stands for the time until the next one, up to 10 minutes, so a
+gap in the log isn't counted as hours of the same load. The card says when a
+bill period's log has gaps.
+
+**The inverter's own draw.** The inverter takes a little power from the grid
+whenever the grid is up, and its load reading doesn't show it. The card adds a
+fixed number of watts for every hour the grid was on. The default is 11 W,
+fitted from the 23 Aug – 23 Sep bills: 135 units billed, 131 counted from the
+log over 438 grid-on hours. Adjust it under **Inverter's own draw** until the
+card matches your meters. The CSV records stay uncorrected, so changing it
+updates every total.
+
+**Two meters.** The inverter's grid input is on a changeover switch between
+two meters, and the inverter can't tell which one is selected. Whenever you
+flip the switch, tap **Grid from: Meter 1 | Meter 2** on the card. If you
+forget, you can enter an earlier time today. Units count to whichever meter
+was selected at the time. Days from before your first tap show as **Not
+assigned**.
+
+**Bill periods.** Set the day and time your meters are read, from the time
+stamp on the meter photo printed on the bill ("Meters read on the 23rd at
+11:57", which is also the default). On the reading day, units before that
+minute go to the old bill and units after it go to the new one, worked out
+from that day's inverter log.
+The card shows:
+
+- this bill so far for each meter, and what it's on pace for, with the rest
+  of the period going to the meter selected now
+- the last bill's totals, to compare with the actual bills
+
+On first start the app fills in both periods from the cloud's history, one
+day per second, in the background.
+
+**What it can't see:**
+
+- loads wired directly to a meter rather than through the inverter
+- grid charging of the battery: the inverter's charging-current reading
+  shows 3–4 A even when the BMS reads no current, so it isn't used
+
+Compare with the real meters now and then. Note a reading and check it
+against the app's number for the same day.
 
 ## Weather
 
@@ -256,7 +322,10 @@ src/                    React frontend
   hooks/                data hooks (TanStack Query + Tauri events)
   lib/                  types, Tauri command wrappers, formatting, battery ETA
 src-tauri/src/          Rust backend
-  inverter/             Solar cloud client, grid detection
+  inverter/             Solar cloud client (live state, settings, history), grid
+                        detection
+  energy/               electricity units: history → units per day and meter,
+                        bill periods, energy CSV
   battery/              BLE / JBD BMS connection and parsing
   automation/           engine (runner.rs), history (CSV), weather, telemetry,
                         guardrails, agent bridge
@@ -313,4 +382,5 @@ need the BMS connected.
   `.app` works on the machine it was built on, but bundling the agent and Node
   for other machines isn't done yet.
 - Records, routine learning and outage detection only happen while the app is
-  running. If the Mac sleeps, that's a gap in the data.
+  running. If the Mac sleeps, that's a gap in the data. (Electricity units are
+  the exception: they come from the inverter's own history.)

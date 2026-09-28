@@ -9,6 +9,8 @@ import type {
   ConnectionStatus,
   DeviceDetails,
   DiscoveredDevice,
+  EnergySummary,
+  MeterNumber,
   InverterSettings,
   InverterSnapshot,
   SavedBleDevice,
@@ -100,3 +102,12 @@ export const getAutomationDecisions = (limit: number) =>
 export const openRecordsFolder = () => invoke<void>("open_records_folder");
 
 export const sendTestNotification = () => invoke<void>("send_test_notification");
+export const getEnergySummary = () => invoke<EnergySummary>("get_energy_summary");
+
+export const setBillReading = (day: number, time: string) =>
+  invoke<EnergySummary>("set_bill_reading", { day, time });
+
+export const setActiveMeter = (meter: MeterNumber, at: string | null) =>
+  invoke<EnergySummary>("set_active_meter", { meter, at });
+
+export const setStandbyWatts = (watts: number) => invoke<EnergySummary>("set_standby_watts", { watts });

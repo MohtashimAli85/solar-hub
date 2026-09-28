@@ -4,6 +4,7 @@ use tauri::AppHandle;
 use tauri_plugin_store::StoreExt as _;
 
 use crate::automation::config::AutomationConfig;
+use crate::energy::EnergyConfig;
 
 const SETTINGS_STORE: &str = "settings.json";
 const AUTOMATION_STORE: &str = "automation.json";
@@ -74,6 +75,22 @@ pub fn save_automation_config(app: &AppHandle, config: &AutomationConfig) -> Res
         .store(AUTOMATION_STORE)
         .map_err(|error| error.to_string())?;
     store.set("config", json!(config));
+    store.save().map_err(|error| error.to_string())
+}
+
+pub fn load_energy_config(app: &AppHandle) -> EnergyConfig {
+    app.store(SETTINGS_STORE)
+        .ok()
+        .and_then(|store| store.get("energy"))
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_energy_config(app: &AppHandle, config: &EnergyConfig) -> Result<(), String> {
+    let store = app
+        .store(SETTINGS_STORE)
+        .map_err(|error| error.to_string())?;
+    store.set("energy", json!(config));
     store.save().map_err(|error| error.to_string())
 }
 
