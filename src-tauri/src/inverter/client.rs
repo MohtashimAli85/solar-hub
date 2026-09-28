@@ -299,6 +299,9 @@ impl SolarClient {
     async fn energy_flow_with_fallback(&self, device_id: &str) -> (Option<EnergyFlowData>, bool) {
         let mut fresh = None;
         for attempt in 1..=2 {
+            if attempt > 1 {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            }
             match self.read_energy_flow_fields(device_id).await {
                 Ok(data) => {
                     fresh = Some(data);

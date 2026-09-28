@@ -57,6 +57,8 @@ const BOOST_GAP_MINUTES: i64 = 5;
 const MAX_BOOSTS_PER_NIGHT: u32 = 4;
 const BOOST_RESERVE_MARGIN: f64 = 2.0;
 const BOOST_POLL: Duration = Duration::from_secs(30);
+const STARTUP_BATTERY_WAIT: Duration = Duration::from_secs(60);
+const STARTUP_RECHECK: Duration = Duration::from_secs(10);
 
 pub fn spawn(state: AutomationState, client: SolarClient, battery: BatteryState, notifier: Notifier, app: AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -479,6 +481,7 @@ pub struct EngineMemory {
     last_sample_at: Option<Instant>,
     last_mode: Option<u32>,
     dry_run: Option<bool>,
+    started_at: Option<Instant>,
 }
 
 impl EngineMemory {
@@ -595,11 +598,18 @@ async fn tick(
     memory: &mut EngineMemory,
 ) -> Duration {
     let now = Local::now().naive_local().with_nanosecond(0).unwrap_or_else(|| Local::now().naive_local());
-    let bms = if services.battery.connection_status().await.connected {
+    let started = *memory.started_at.get_or_insert_with(Instant::now);
+    let connection = services.battery.connection_status().await;
+    let bms = if connection.connected {
         services.battery.latest_snapshot().await
     } else {
         None
     };
+    // Right after launch the saved battery takes a few seconds to reconnect;
+    // deciding before that means deciding without the battery %.
+    if bms.is_none() && connection.reconnecting && started.elapsed() < STARTUP_BATTERY_WAIT {
+        return STARTUP_RECHECK;
+    }
 
     let reading = match services.client.read_inverter_snapshot(None).await {
         Ok(snapshot) => {
@@ -875,7 +885,7 @@ async fn apply_smart_load(engine: &Engine<'_>, memory: &mut EngineMemory, readin
     let (enable, due, reason) = match memory.window? {
         Window::Day => (false, now, "disable smart load for the day — plenty of sun, so everything can run".to_string()),
         Window::Night => {
-            if memory.night.boost.is_some() {
+            if memory.night.boost.is_some() || night_soc(&memory.night, reading, config.dry_run).is_none() {
                 return None;
             }
             if !memory.night.smart_load_released && battery_covers_everything_until_sunrise(ctx, reading, &memory.night, config) {
@@ -2442,6 +2452,17 @@ mod tests {
         let on = EngineReading { smart_load: Some(true), ..reading(80.0, SOLAR_MODE, 300.0) };
         apply_smart_load(&h.engine(&agent), &mut memory, &on, &ctx(in_month(6, 10, 21, 30))).await;
         assert_eq!(memory.night.smart_load_applied, Some(true));
+        assert!(h.notifier.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn without_a_battery_reading_smart_load_is_left_alone_at_night() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![], vec![]);
+        let mut memory = night_memory();
+        let no_soc = EngineReading { soc: None, battery_a: None, ..reading(0.0, SBG_MODE, 118.0) };
+        apply_smart_load(&h.engine(&agent), &mut memory, &no_soc, &ctx(at(28, 6, 24))).await;
+        assert_eq!(memory.night.smart_load_applied, None, "this morning's 6:24 AM enable came from a missing battery %");
         assert!(h.notifier.sent.lock().unwrap().is_empty());
     }
 
