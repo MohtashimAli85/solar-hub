@@ -114,6 +114,8 @@ pub struct RecentDayRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct NextDayRow {
     pub date: String,
+    /// "today" before sunrise, "tomorrow" after it.
+    pub relative: String,
     pub radiation_kwh_m2: Option<f64>,
     pub sunshine_h: Option<f64>,
     pub cloud_pct: Option<f64>,
@@ -144,6 +146,9 @@ pub struct SmartLoadBrief {
 #[derive(Debug, Clone, Serialize)]
 pub struct NightInput {
     pub now: String,
+    /// The day whose sun will next charge the battery: "today" after
+    /// midnight, "tomorrow" in the evening.
+    pub coming_day: String,
     pub month: String,
     pub latitude: f64,
     pub on_battery: bool,

@@ -2,7 +2,7 @@
 
 A personal macOS desktop app for a home solar setup: it shows what the inverter
 and battery are doing right now, and uses Gemini to decide when the house
-should run on battery and when it should run on grid, day and night.
+should run on battery (SBG) and when it should be in Solar mode, day and night.
 
 Built with Tauri 2 (Rust) + React 19 + TypeScript. The inverter is read from
 its cloud (Solar of Things / siseli), and the battery is read directly from its
@@ -64,9 +64,13 @@ Automation only switches between **Solar** and **SBG**.
 
 ## How the automation works
 
-The day is split into two windows: **Day** runs from sunrise until the night
-start (21:00 by default, adjustable from 17:00 to 23:00), and **Night** runs
-from the night start until sunrise.
+The day is split into two windows:
+
+- **Night** runs from the night start (21:00 by default, adjustable from
+  17:00 to 23:00) until sunrise plus the **sunrise buffer** (1 hour by
+  default). The panels can't carry the house right at sunrise, so the night
+  plan keeps running until they can.
+- **Day** runs from then until the night start.
 
 ### Night: a battery budget, not a yes/no
 
@@ -84,8 +88,12 @@ for example "on battery until 30%".
     when the house is usually quiet by 23:00.
   - **Load-shedding:** recent grid outages. More outages mean it keeps more
     backup.
-  - **Tomorrow's sun:** if tomorrow looks as sunny as recent days when the
-    battery filled up, it can go lower. If it's cloudy, it keeps more.
+  - **The coming day's sun:** tomorrow's in the evening, today's after
+    midnight. If it looks as sunny as recent days when the battery filled up,
+    it can go lower. If it's cloudy, it keeps more.
+  - **Your expectation:** on a normal night (sunny coming day, few outages)
+    the battery is used down to about the floor (~20%) by morning. It only
+    keeps more for a real reason.
   - **The season:** tonight's forecast low compared with recent nights, since
     cooler nights mean less fan and AC load.
 - A few minutes after switching, it measures the real draw (5 samples after a
@@ -96,7 +104,7 @@ for example "on battery until 30%".
 
 ### Night: oven boost
 
-When the house is on grid at night (Solar mode, no sun) and a big load shows
+When the inverter is in Solar mode at night (the grid carries the house, no sun) and a big load shows
 up, like the oven, the app covers the spike from the battery. It switches to
 **SBG with smart load off for 3 minutes**, then back to **Solar**, restoring
 smart load, even if the load is still high.
@@ -129,7 +137,7 @@ inverter's limit once the load stops. Then:
 - If the battery will be full, **SBG** is fine.
 - If it clearly won't (little or no sun), it switches to **Solar**, so the
   grid carries the house and every bit of solar goes into the battery.
-- After sunset nothing can charge the battery, so 18:00–21:00 runs on grid.
+- After sunset nothing can charge the battery, so 18:00–21:00 runs in Solar mode, with the grid carrying the house.
 
 SBG during the day only makes sense while the sun is actually charging the
 battery. If the battery is being drained on SBG (or, in dry run, *would* be),
@@ -150,11 +158,25 @@ nothing is due and the projection already agrees. The button shows
 
 ### Smart load
 
-Smart load is set **once per window**: off at sunrise, and on at night. In
-summer (April–August) it comes on right at the night start. The rest of the
-year the agent picks a time between the night start and 23:00, and 23:00 is
-the latest. It stays on through outages. If you change it by hand, the app
-leaves it alone until the next window.
+- **On = smart load enabled:** heavy loads and the connections that aren't on
+  the UPS are cut. This protects the battery.
+- **Off = smart load disabled:** nothing is cut; everything runs.
+
+The app sets it like this:
+
+- **Day:** off at sunrise, so everything runs on the sun.
+- **Night:** on, to protect the battery. In summer (April–August) it goes on
+  right at the night start. The rest of the year the agent picks a time
+  between the night start and 23:00, and 23:00 is the latest.
+- **Near morning:** back off once the battery can easily reach sunrise above
+  tonight's reserve *with everything running*. That's worked out from your
+  heaviest usual night-time load, or 1 kW if there's no history yet. Once off,
+  it stays off until the day starts, so it doesn't flip back and forth.
+- **Oven boost:** off for the 3 minutes of a boost so the oven can run, then
+  restored.
+
+Each setting is applied once when the target changes. If you change it by
+hand, the app leaves it alone until the target changes again.
 
 ### Safety
 
@@ -170,7 +192,7 @@ leaves it alone until the next window.
 - At most two switches to battery per night, and at least 10 minutes between
   switches. Oven boosts have their own limit (4 a night, 5 minutes apart).
 - It won't switch to battery, or change the daytime mode, while the grid is
-  off. Switching back to grid is always allowed.
+  off. Switching back to Solar is always allowed.
 - After three failed AI calls in a row while on battery, it switches back to
   grid rather than running the battery unattended.
 
@@ -239,8 +261,15 @@ src-tauri/src/          Rust backend
   automation/           engine (runner.rs), history (CSV), weather, telemetry,
                         guardrails, agent bridge
   notifications.rs      alert rules and macOS notifications
-agent/                  Node scripts that call Gemini: night.js, day.js, sun.js
+agent/                  Node scripts that call Gemini: night.js, day.js, sun.js,
+                        and system.js (the one shared system prompt: modes,
+                        smart load, household rules, goals)
 ```
+
+Every agent call sends the same system prompt from `agent/system.js`. It holds
+the house rules: what Solar/SBG/Utility and smart load mean, load-shedding,
+the EV and oven, and the goals in order. The night and day prompts only add
+the numbers for that moment. Change house facts in that one file.
 
 The Rust engine runs the whole state machine and pre-computes everything the
 model needs: the battery trajectory, routine, outages, forecast summary and

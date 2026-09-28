@@ -24,7 +24,7 @@ function modeLine(status: AutomationStatus): string | null {
   const physical = status.mode_name;
   const effective = status.effective_mode;
   if (!physical && !effective) return null;
-  const words = (mode: string | null) => (mode === "SBG" ? "on battery (SBG)" : mode === "Solar" ? "on grid (Solar)" : mode ?? "unknown");
+  const words = (mode: string | null) => (mode === "SBG" ? "on battery (SBG)" : mode === "Solar" ? "in Solar mode" : mode ?? "unknown");
   if (status.dry_run && effective && effective !== physical) {
     return `Would be ${words(effective)} · inverter is ${words(physical)}`;
   }

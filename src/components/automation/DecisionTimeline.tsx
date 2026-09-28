@@ -8,8 +8,8 @@ import { clock, EmptyNote, SectionTitle, Skeleton } from "./shared";
 const MODE_LABELS: Record<string, string> = {
   sbg: "Battery",
   boost_sbg: "Battery · oven boost",
-  smart_load_on: "Smart load on",
-  smart_load_off: "Smart load off",
+  smart_load_on: "Smart load on · heavy loads cut",
+  smart_load_off: "Smart load off · everything runs",
 };
 
 function outcome(decision: AutomationDecision): string {

@@ -224,7 +224,10 @@ export interface SmartLoadInsight {
   on: boolean | null;
   planned_on_at: LocalDateTime | null;
   night_on_at: LocalDateTime | null;
-  done: boolean;
+  /** What the engine last set this window: true = on (heavy loads cut). */
+  applied: boolean | null;
+  /** Near morning with enough battery: off for the rest of the night. */
+  released: boolean;
 }
 
 export interface AutomationDecision {

@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import SunCalc from "suncalc";
+import { SYSTEM_PROMPT } from "./system.js";
 
 const MODEL = "gemini-3.5-flash-lite";
 
@@ -37,6 +38,7 @@ export async function generateStructured({ schema, prompt }) {
     model: MODEL,
     contents: prompt,
     config: {
+      systemInstruction: SYSTEM_PROMPT,
       responseMimeType: "application/json",
       responseSchema: schema,
     },

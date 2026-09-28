@@ -98,13 +98,15 @@ export function OutputSourcePanel({
         <div>
           <p className="text-sm font-medium">
             Smart load{" "}
-            <span className={cn("text-xs", smartLoadOn ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>
-              {smartLoadOn ? "on" : "off"}
+            <span className={cn("text-xs", smartLoadOn ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")}>
+              {smartLoadOn ? "on — heavy loads cut" : "off — everything runs"}
             </span>
           </p>
-          {smartLoadUnsupported ? (
-            <p className="text-[11px] text-muted-foreground">Not supported by this device</p>
-          ) : null}
+          <p className="text-[11px] text-muted-foreground">
+            {smartLoadUnsupported
+              ? "Not supported by this device"
+              : "On cuts heavy and non-UPS loads to protect the battery. Off lets everything run."}
+          </p>
         </div>
         <Switch
           checked={smartLoadOn}

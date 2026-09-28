@@ -133,11 +133,14 @@ export function ChartTooltipBox({ children }: { children: ReactNode }) {
 
 export function smartLoadText(smart: SmartLoadInsight | null | undefined, window: "day" | "night" | null): string | null {
   if (!smart) return null;
-  const state = smart.on == null ? "" : smart.on ? " · now on" : " · now off";
   if (window === "night") {
-    if (smart.done) return `Smart load on for the night${state}`;
-    return `Smart load on at ${clock(smart.planned_on_at)} (${smart.season})${state}`;
+    if (smart.released) return "Smart load off — the battery lasts until sunrise, so everything can run";
+    if (smart.applied === true) return "Smart load on — heavy loads cut to protect the battery";
+    return `Smart load goes on at ${clock(smart.planned_on_at)} (${smart.season}) to cut heavy loads`;
   }
-  const tonight = smart.season === "summer" ? `on at ${clock(smart.night_on_at)} tonight` : `on between ${clock(smart.night_on_at)} and 11 PM tonight`;
-  return `Smart load off for the day, ${tonight}${state}`;
+  const tonight =
+    smart.season === "summer"
+      ? `goes on at ${clock(smart.night_on_at)} tonight`
+      : `goes on between ${clock(smart.night_on_at)} and 11 PM tonight`;
+  return `Smart load off for the day — everything runs. It ${tonight} to cut heavy loads.`;
 }

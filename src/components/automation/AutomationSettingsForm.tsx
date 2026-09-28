@@ -128,13 +128,13 @@ export function AutomationSettingsForm({ config, saving, testing, onSave, onTest
                 ))}
               </Select>
               <p className="text-[11px] leading-snug text-muted-foreground">
-                Before this the house stays on grid; the battery plan starts here.
+                Before this the inverter stays in Solar mode (the grid carries the evening); the battery plan starts here.
               </p>
             </div>
             <NumberField
               id="sunrise-buffer"
               label="Sunrise buffer (hours)"
-              help="Extra time after sunrise before the panels can carry the house."
+              help="Extra time after sunrise before the panels can carry the house. The night plan stays on battery until then; the day check starts after it."
               value={form.sunrise_buffer_hours}
               step={0.5}
               error={errors.sunrise_buffer_hours}
@@ -167,7 +167,7 @@ export function AutomationSettingsForm({ config, saving, testing, onSave, onTest
             <NumberField
               id="oven-boost"
               label="Oven boost above (A)"
-              help="At night on grid with no sun, a load this big (in battery amps) runs from the battery for 3 min with smart load off, then back to Solar. Up to 4 a night, never below tonight's reserve. 0 = off."
+              help="At night in Solar mode with no sun, a load this big (in battery amps) runs from the battery for 3 min with smart load off (so the oven can run), then back to Solar. Up to 4 a night, never below tonight's reserve. 0 = off."
               value={form.oven_boost_amps}
               error={errors.oven_boost_amps}
               onChange={(value) => set("oven_boost_amps", value)}

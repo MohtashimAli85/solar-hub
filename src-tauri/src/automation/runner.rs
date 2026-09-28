@@ -46,6 +46,7 @@ const NOMINAL_PACK_VOLTS: f64 = 51.2;
 const INVERTER_EFFICIENCY: f64 = 0.9;
 const SUMMER_MONTHS: std::ops::RangeInclusive<u32> = 4..=8;
 const SMART_LOAD_LATEST_HOUR: u32 = 23;
+const HEAVY_LOAD_FALLBACK_W: f64 = 1000.0;
 const DAY_DRAIN_A: f64 = 1.0;
 const DRAIN_CHECKS_TO_SWITCH: u32 = 2;
 const SUN_GONE_PV_W: f64 = 50.0;
@@ -125,6 +126,9 @@ struct Clock {
     sunset_today: NaiveDateTime,
     sunrise_tomorrow: NaiveDateTime,
     night_start_hour: u32,
+    /// The sunrise buffer: the night plan runs until the panels can carry
+    /// the house, not just until the sun is up.
+    morning_buffer: chrono::Duration,
 }
 
 impl Clock {
@@ -137,6 +141,7 @@ impl Clock {
         sunset: NaiveDateTime,
         next_sunrise: NaiveDateTime,
         night_start_hour: u32,
+        sunrise_buffer_hours: f64,
     ) -> Self {
         let today = now.date();
         let tomorrow = today.succ_opt().unwrap_or(today);
@@ -146,17 +151,24 @@ impl Clock {
             sunset_today: today.and_time(sunset.time()),
             sunrise_tomorrow: tomorrow.and_time(next_sunrise.time()),
             night_start_hour,
+            morning_buffer: chrono::Duration::minutes((sunrise_buffer_hours * 60.0).round() as i64),
         }
+    }
+
+    /// When the day check takes over: sunrise plus the buffer.
+    fn day_start(&self) -> NaiveDateTime {
+        self.sunrise_today + self.morning_buffer
     }
 
     fn night_start_on(&self, date: NaiveDate) -> NaiveDateTime {
         date.and_hms_opt(self.night_start_hour, 0, 0).unwrap_or(self.now)
     }
 
-    /// Day runs from sunrise to the configured night start (21:00 by default),
-    /// so the evening after sunset stays on grid.
+    /// Day runs from sunrise + buffer to the configured night start (21:00 by
+    /// default), so the evening after sunset stays in Solar mode and the night plan
+    /// keeps the house on battery until the panels can take over.
     fn window(&self) -> Window {
-        if self.now >= self.sunrise_today && self.now < self.night_start_on(self.now.date()) {
+        if self.now >= self.day_start() && self.now < self.night_start_on(self.now.date()) {
             Window::Day
         } else {
             Window::Night
@@ -164,7 +176,7 @@ impl Clock {
     }
 
     fn next_sunrise(&self) -> NaiveDateTime {
-        if self.now < self.sunrise_today {
+        if self.now < self.day_start() {
             self.sunrise_today
         } else {
             self.sunrise_tomorrow
@@ -173,7 +185,7 @@ impl Clock {
 
     /// The night that is running now, or the one coming up this evening.
     fn night(&self) -> NaiveDate {
-        if self.now < self.sunrise_today {
+        if self.now < self.day_start() {
             self.now.date().pred_opt().unwrap_or(self.now.date())
         } else {
             self.now.date()
@@ -189,7 +201,7 @@ impl Clock {
     }
 
     fn next_solar_day(&self) -> NaiveDate {
-        if self.now < self.sunrise_today {
+        if self.now < self.day_start() {
             self.now.date()
         } else {
             self.now.date().succ_opt().unwrap_or(self.now.date())
@@ -386,7 +398,8 @@ struct NightMemory {
     last_write_at: Option<Instant>,
     last_written_mode: Option<u32>,
     smart_load_on_at: Option<NaiveDateTime>,
-    smart_load_done: bool,
+    smart_load_applied: Option<bool>,
+    smart_load_released: bool,
     last_reserve_soc: Option<f64>,
     boost: Option<Boost>,
     boosts: u32,
@@ -417,7 +430,8 @@ impl Default for NightMemory {
             last_write_at: None,
             last_written_mode: None,
             smart_load_on_at: None,
-            smart_load_done: false,
+            smart_load_applied: None,
+            smart_load_released: false,
             last_reserve_soc: None,
             boost: None,
             boosts: 0,
@@ -434,7 +448,7 @@ struct DayMemory {
     last_write_at: Option<Instant>,
     last_written_mode: Option<u32>,
     ai_failure_notified: bool,
-    smart_load_done: bool,
+    smart_load_applied: Option<bool>,
     forced: bool,
     drain_checks: u32,
 }
@@ -666,7 +680,14 @@ async fn tick(
         .await;
 
     refresh_weather(memory, services.weather_http, latitude, longitude).await;
-    let clock = Clock::for_today(now, sunrise_today, sunset_today, sunrise_tomorrow, config.night_start_hour);
+    let clock = Clock::for_today(
+        now,
+        sunrise_today,
+        sunset_today,
+        sunrise_tomorrow,
+        config.night_start_hour,
+        config.sunrise_buffer_hours,
+    );
     let samples = state.history.recent_samples(now.date());
     let ctx = Context::build(clock, latitude, samples, usable_forecast(memory, latitude, longitude), config);
 
@@ -815,52 +836,88 @@ fn smart_load_brief(clock: &Clock, reading: &EngineReading) -> SmartLoadBrief {
     }
 }
 
-/// Sets the smart-load output once per window: off for the day, on for the
-/// night. After that the user is free to change it by hand.
+/// Whether the battery can reach sunrise above tonight's reserve even with
+/// everything running (smart load disabled, heavy loads on). True only close
+/// to morning; then there's no reason to keep cutting heavy loads.
+fn battery_covers_everything_until_sunrise(
+    ctx: &Context,
+    reading: &EngineReading,
+    night: &NightMemory,
+    config: &AutomationConfig,
+) -> bool {
+    let Some(soc) = night_soc(night, reading, config.dry_run) else {
+        return false;
+    };
+    let hours = (ctx.clock.next_sunrise() - ctx.clock.now).num_minutes() as f64 / 60.0;
+    if hours <= 0.0 {
+        return true;
+    }
+    let heavy_w = ctx
+        .profile
+        .hourly
+        .iter()
+        .map(|hour| hour.load_w)
+        .fold(HEAVY_LOAD_FALLBACK_W, f64::max)
+        .max(reading.load_w.unwrap_or(0.0));
+    let Some(per_hour) = soc_per_hour_at(heavy_w, reading.rated_capacity_ah, pack_volts(reading)) else {
+        return false;
+    };
+    let reserve = night.last_reserve_soc.unwrap_or(config.min_soc_percent).max(config.min_soc_percent);
+    soc - hours * per_hour >= reserve
+}
+
+/// Smart load ON (enabled) cuts heavy loads and non-UPS circuits to protect
+/// the battery; OFF (disabled) lets everything run. Each target is applied
+/// once when it changes, so a manual change in between is left alone.
 async fn apply_smart_load(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &EngineReading, ctx: &Context) -> Option<Duration> {
     let now = ctx.clock.now;
-    let (target, due, reason) = match memory.window? {
-        Window::Day => {
-            if memory.day.smart_load_done {
-                return None;
-            }
-            (false, now, "smart load off for the day so the panels charge the battery".to_string())
-        }
+    let config = engine.config;
+    let (enable, due, reason) = match memory.window? {
+        Window::Day => (false, now, "disable smart load for the day — plenty of sun, so everything can run".to_string()),
         Window::Night => {
-            if memory.night.smart_load_done || memory.night.boost.is_some() {
+            if memory.night.boost.is_some() {
                 return None;
             }
-            let due = smart_load_on_time(&ctx.clock, &memory.night);
-            let reason = if is_summer(ctx.clock.night()) {
-                "smart load on for the night (summer)".to_string()
+            if !memory.night.smart_load_released && battery_covers_everything_until_sunrise(ctx, reading, &memory.night, config) {
+                memory.night.smart_load_released = true;
+            }
+            if memory.night.smart_load_released {
+                (false, now, "disable smart load — the battery easily lasts until sunrise with everything running".to_string())
             } else {
-                format!("smart load on for the night (winter, from {})", hhmm(due))
-            };
-            (true, due, reason)
+                let due = smart_load_on_time(&ctx.clock, &memory.night);
+                let reason = if is_summer(ctx.clock.night()) {
+                    "enable smart load for the night — cutting heavy and non-UPS loads to protect the battery (summer)".to_string()
+                } else {
+                    format!("enable smart load for the night — cutting heavy and non-UPS loads to protect the battery (winter, from {})", hhmm(due))
+                };
+                (true, due, reason)
+            }
         }
     };
-    if now < due {
-        return Some(until(now, Some(due), normal_interval(engine.config)));
-    }
-    let done = |memory: &mut EngineMemory| match memory.window {
-        Some(Window::Day) => memory.day.smart_load_done = true,
-        Some(Window::Night) => memory.night.smart_load_done = true,
-        None => {}
+    let applied = match memory.window {
+        Some(Window::Day) => &mut memory.day.smart_load_applied,
+        _ => &mut memory.night.smart_load_applied,
     };
-    if reading.smart_load == Some(target) {
-        done(memory);
+    if *applied == Some(enable) {
         return None;
     }
-    if !engine.config.dry_run {
-        if let Err(error) = engine.client.write_smart_load(None, target).await {
+    if now < due {
+        return Some(until(now, Some(due), normal_interval(config)));
+    }
+    if reading.smart_load == Some(enable) {
+        *applied = Some(enable);
+        return None;
+    }
+    if !config.dry_run {
+        if let Err(error) = engine.client.write_smart_load(None, enable).await {
             tracing::warn!("automation could not set smart load: {error}");
             return Some(FAST_TICK);
         }
     }
+    *applied = Some(enable);
     let window = memory.window.unwrap_or(Window::Night);
-    engine.record(now, window, if target { "smart_load_on" } else { "smart_load_off" }, None, None, None, true, &capitalize(&reason));
-    engine.notify_action(&format!("turn {reason}")).await;
-    done(memory);
+    engine.record(now, window, if enable { "smart_load_on" } else { "smart_load_off" }, None, None, None, true, &capitalize(&reason));
+    engine.notify_action(&reason).await;
     None
 }
 
@@ -926,10 +983,21 @@ fn sleeping_load_w(profile: &NightProfile) -> Option<f64> {
     [0, 1, 2, 3, 4, 5].iter().filter_map(|hour| profile.load_at(*hour)).reduce(f64::min)
 }
 
-fn weather_brief(summary: &WeatherSummary) -> WeatherBrief {
+fn relative_day(date: NaiveDate, today: NaiveDate) -> String {
+    if date == today {
+        "today".into()
+    } else if today.succ_opt() == Some(date) {
+        "tomorrow".into()
+    } else {
+        date.format("%A").to_string()
+    }
+}
+
+fn weather_brief(summary: &WeatherSummary, today: NaiveDate) -> WeatherBrief {
     WeatherBrief {
         next_day: summary.next_day.as_ref().map(|day| NextDayRow {
             date: day.date.format("%a %d %b").to_string(),
+            relative: relative_day(day.date, today),
             radiation_kwh_m2: day.radiation_kwh_m2,
             sunshine_h: day.sunshine_h,
             cloud_pct: day.cloud_pct,
@@ -988,6 +1056,7 @@ fn build_night_input(
 
     NightInput {
         now: now.format("%a %d %b %Y, %H:%M").to_string(),
+        coming_day: relative_day(ctx.clock.next_solar_day(), now.date()),
         month: now.format("%B").to_string(),
         latitude: (ctx.latitude * 10.0).round() / 10.0,
         on_battery,
@@ -1028,7 +1097,7 @@ fn build_night_input(
                 minutes: outage.minutes.round(),
             })
             .collect(),
-        weather: ctx.weather.as_ref().map(weather_brief),
+        weather: ctx.weather.as_ref().map(|summary| weather_brief(summary, now.date())),
         smart_load: smart_load_brief(&ctx.clock, reading),
     }
 }
@@ -1103,7 +1172,7 @@ async fn night_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
     }
 }
 
-/// The boost only applies while the night plan has the house on grid.
+/// The boost only applies while the night plan has the inverter in Solar mode.
 fn boost_watch(config: &AutomationConfig, night: &NightMemory) -> bool {
     config.oven_boost_amps > 0.0
         && night.phase == NightPhase::Deciding
@@ -1136,7 +1205,7 @@ async fn write_smart_load(engine: &Engine<'_>, on: bool) -> bool {
     }
 }
 
-/// A big night-time load on grid (an oven) runs from the battery for a few
+/// A big night-time load in Solar mode (an oven) runs from the battery for a few
 /// minutes with smart load off, then goes back to Solar. Returns the wait
 /// while a boost is running so the regular night logic stays out of the way.
 async fn oven_boost(
@@ -1635,9 +1704,9 @@ async fn day_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &Engi
     if sun_is_done(ctx, reading) {
         let night_start = hhmm(ctx.clock.night_start_on(now.date()));
         let sun = if now >= ctx.clock.sunset_today { "The sun has set" } else { "The sun is done for the day" };
-        let reason = format!("{sun} — running on grid until night starts at {night_start}, keeping the battery for tonight.");
-        if day.effective_mode == Some(SBG_MODE)
-            && switch_day_mode(engine, day, reading, SOLAR_MODE, &format!("switch to Solar — {}", reason.to_lowercase())).await
+        let reason = format!("{sun} — Solar mode until night starts at {night_start}, keeping the battery for tonight.");
+        let notice = format!("switch to Solar — {}, keeping the battery for tonight", sun.to_lowercase());
+        if day.effective_mode == Some(SBG_MODE) && switch_day_mode(engine, day, reading, SOLAR_MODE, &notice).await
         {
             engine.record(now, Window::Day, "solar", None, None, None, true, &reason);
         }
@@ -1779,11 +1848,12 @@ fn build_insights(
             on: reading.smart_load,
             planned_on_at: (window == Window::Night).then(|| smart_load_on_time(clock, night)),
             night_on_at: if window == Window::Night { None } else { Some(clock.night_start_on(clock.now.date())) },
-            done: match memory.window {
-                Some(Window::Day) => memory.day.smart_load_done,
-                Some(Window::Night) => night.smart_load_done,
-                None => false,
+            applied: match memory.window {
+                Some(Window::Day) => memory.day.smart_load_applied,
+                Some(Window::Night) => night.smart_load_applied,
+                None => None,
             },
+            released: memory.window == Some(Window::Night) && night.smart_load_released,
         }),
     }
 }
@@ -1811,6 +1881,7 @@ mod tests {
             sunset_today: date.and_hms_opt(18, 0, 0).unwrap(),
             sunrise_tomorrow: date.succ_opt().unwrap().and_hms_opt(6, 0, 0).unwrap(),
             night_start_hour: 21,
+            morning_buffer: chrono::Duration::zero(),
         }
     }
 
@@ -1983,12 +2054,32 @@ mod tests {
 
     #[test]
     fn yesterdays_sun_times_just_after_midnight_still_mean_night() {
-        let c = Clock::for_today(at(28, 0, 4), at(27, 5, 55), at(27, 17, 55), at(28, 5, 55), 21);
+        let c = Clock::for_today(at(28, 0, 4), at(27, 5, 55), at(27, 17, 55), at(28, 5, 55), 21, 0.0);
         assert_eq!(c.sunrise_today, at(28, 5, 55));
-        assert_eq!(c.window(), Window::Night, "this is the bug that ran the house on grid all night");
+        assert_eq!(c.window(), Window::Night, "this is the bug that kept the inverter in Solar mode all night");
         assert_eq!(c.next_sunrise(), at(28, 5, 55));
-        let morning = Clock::for_today(at(28, 7, 0), at(27, 5, 55), at(27, 17, 55), at(28, 5, 55), 21);
+        let morning = Clock::for_today(at(28, 7, 0), at(27, 5, 55), at(27, 17, 55), at(28, 5, 55), 21, 0.0);
         assert_eq!(morning.window(), Window::Day);
+    }
+
+    #[test]
+    fn the_night_plan_runs_until_sunrise_plus_the_buffer() {
+        let at_6_02 = Clock::for_today(at(28, 6, 2), at(28, 5, 55), at(28, 17, 54), at(29, 5, 56), 21, 1.0);
+        assert_eq!(at_6_02.window(), Window::Night, "6:02 AM is still the night plan, not the day check");
+        assert_eq!(at_6_02.next_sunrise(), at(28, 5, 55));
+        assert_eq!(at_6_02.night(), at(27, 0, 0).date());
+        assert_eq!(at_6_02.next_solar_day(), at(28, 0, 0).date());
+        let at_7 = Clock::for_today(at(28, 7, 0), at(28, 5, 55), at(28, 17, 54), at(29, 5, 56), 21, 1.0);
+        assert_eq!(at_7.window(), Window::Day);
+        assert_eq!(at_7.next_solar_day(), at(29, 0, 0).date());
+    }
+
+    #[test]
+    fn before_sunrise_the_coming_solar_day_is_today() {
+        let dawn = clock(at(28, 5, 52));
+        assert_eq!(relative_day(dawn.next_solar_day(), dawn.now.date()), "today");
+        let evening = clock(at(27, 22, 0));
+        assert_eq!(relative_day(evening.next_solar_day(), evening.now.date()), "tomorrow");
     }
 
     #[test]
@@ -2298,8 +2389,8 @@ mod tests {
         let mut memory = night_memory();
         let cap = apply_smart_load(&h.engine(&agent), &mut memory, &reading(80.0, SOLAR_MODE, 300.0), &ctx(in_month(7, 10, 21, 0))).await;
         assert!(cap.is_none());
-        assert!(memory.night.smart_load_done);
-        assert!(h.notifier.sent.lock().unwrap()[0].contains("smart load on"));
+        assert_eq!(memory.night.smart_load_applied, Some(true));
+        assert!(h.notifier.sent.lock().unwrap()[0].contains("enable smart load"));
     }
 
     #[tokio::test]
@@ -2313,10 +2404,10 @@ mod tests {
 
         let cap = apply_smart_load(&engine, &mut memory, &reading(45.0, SOLAR_MODE, 300.0), &ctx(at(26, 21, 0))).await;
         assert!(cap.is_some_and(|wait| wait <= Duration::from_secs(90 * 60)));
-        assert!(!memory.night.smart_load_done);
+        assert_eq!(memory.night.smart_load_applied, None);
 
         apply_smart_load(&engine, &mut memory, &reading(45.0, SOLAR_MODE, 300.0), &ctx(at(26, 22, 31))).await;
-        assert!(memory.night.smart_load_done);
+        assert_eq!(memory.night.smart_load_applied, Some(true));
     }
 
     #[test]
@@ -2339,8 +2430,8 @@ mod tests {
         let engine = h.engine(&agent);
         apply_smart_load(&engine, &mut memory, &on, &ctx(at(26, 7, 0))).await;
         apply_smart_load(&engine, &mut memory, &on, &ctx(at(26, 8, 0))).await;
-        assert!(memory.day.smart_load_done);
-        assert_eq!(h.notifier.sent.lock().unwrap().len(), 1);
+        assert_eq!(memory.day.smart_load_applied, Some(false));
+        assert_eq!(h.notifier.sent.lock().unwrap().len(), 1, "a manual re-enable after that is left alone");
     }
 
     #[tokio::test]
@@ -2350,8 +2441,31 @@ mod tests {
         let mut memory = night_memory();
         let on = EngineReading { smart_load: Some(true), ..reading(80.0, SOLAR_MODE, 300.0) };
         apply_smart_load(&h.engine(&agent), &mut memory, &on, &ctx(in_month(6, 10, 21, 30))).await;
-        assert!(memory.night.smart_load_done);
+        assert_eq!(memory.night.smart_load_applied, Some(true));
         assert!(h.notifier.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn near_morning_with_enough_battery_smart_load_is_disabled_not_enabled() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![], vec![]);
+        let engine = h.engine(&agent);
+        let mut memory = night_memory();
+        memory.night.last_reserve_soc = Some(28.0);
+        let enabled = EngineReading { smart_load: Some(true), ..reading(52.0, SBG_MODE, 120.0) };
+
+        apply_smart_load(&engine, &mut memory, &enabled, &ctx(at(27, 3, 0))).await;
+        assert!(!memory.night.smart_load_released, "3 hours before sunrise the battery still needs protecting");
+
+        let mut morning = night_memory();
+        morning.night.last_reserve_soc = Some(28.0);
+        apply_smart_load(&engine, &mut morning, &enabled, &ctx(at(27, 5, 30))).await;
+        assert!(morning.night.smart_load_released);
+        assert_eq!(morning.night.smart_load_applied, Some(false), "this morning's 5:30 AM restart must not enable it");
+
+        let lower = EngineReading { smart_load: Some(false), ..reading(30.0, SBG_MODE, 120.0) };
+        apply_smart_load(&engine, &mut morning, &lower, &ctx(at(27, 5, 45))).await;
+        assert_eq!(morning.night.smart_load_applied, Some(false), "once released it stays disabled until day");
     }
 
     fn oven(load_w: f64) -> EngineReading {

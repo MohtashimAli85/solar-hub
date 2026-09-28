@@ -20,14 +20,14 @@ function lines(rows, format, empty) {
   return rows && rows.length ? rows.map(format).join("\n") : empty;
 }
 
-function weatherSection(weather) {
+function weatherSection(weather, comingDay) {
   if (!weather) {
-    return "Forecast unavailable right now — assume tomorrow's sun is uncertain and keep a larger reserve.";
+    return `Forecast unavailable right now — assume ${comingDay}'s sun is uncertain and keep a larger reserve.`;
   }
   const next = weather.next_day;
   const nextLine = next
-    ? `Next solar day (${next.date}): ${n(next.radiation_kwh_m2, " kWh/m²", 1)} radiation, ${n(next.sunshine_h, " h", 1)} sunshine, ${n(next.cloud_pct, "%")} daytime cloud, ${n(next.rain_prob_pct, "%")} rain chance.`
-    : "Next solar day: no forecast.";
+    ? `The sun that will next charge the battery is ${next.relative}'s (${next.date}): ${n(next.radiation_kwh_m2, " kWh/m²", 1)} radiation, ${n(next.sunshine_h, " h", 1)} sunshine, ${n(next.cloud_pct, "%")} daytime cloud, ${n(next.rain_prob_pct, "%")} rain chance.`
+    : `No forecast for ${comingDay}.`;
   const recent = lines(
     weather.recent_days,
     (d) =>
@@ -44,11 +44,12 @@ Tonight's forecast low: ${n(weather.tonight_min_temp_c, "°C", 1)} vs ${n(weathe
 
 function smartLoadSection(smart) {
   if (!smart) return "";
-  const state = smart.currently_on == null ? "unknown" : smart.currently_on ? "on" : "off";
+  const state =
+    smart.currently_on == null ? "unknown" : smart.currently_on ? "ON (enabled — heavy loads cut)" : "OFF (disabled — everything running)";
   if (!smart.choose_on_time) {
-    return `Smart load (a switchable circuit — typically cooling like fans/AC) is currently ${state}. It is ${smart.season}, so it comes on at ${smart.earliest} automatically — just return "${smart.earliest}" for smart_load_on_at.`;
+    return `Smart load is currently ${state}. It is ${smart.season}, so the controller enables it at ${smart.earliest} — return "${smart.earliest}" for smart_load_on_at.`;
   }
-  return `Smart load (a switchable circuit — typically cooling like fans/AC) is currently ${state}. It is ${smart.season}, so you choose when it turns on tonight, between ${smart.earliest} and ${smart.latest}. Warmer nights or a busy household → earlier; a cold night → later. It always comes on by ${smart.latest}, and it adds to the load once on.`;
+  return `Smart load is currently ${state}. It is ${smart.season}: choose when to enable it tonight (cutting heavy and non-UPS loads), between ${smart.earliest} and ${smart.latest}. Enable it earlier when the battery needs protecting — a warm night with heavy cooling loads, a busy household, a tight reserve, or a long night ahead; later when the night is cool and the battery has room. The controller enables it by ${smart.latest} at the latest.`;
 }
 
 export function buildPrompt(input) {
@@ -59,7 +60,7 @@ export function buildPrompt(input) {
           ? ` Previous plan: keep a ${input.previous_plan.reserve_soc}% reserve, because "${input.previous_plan.reason}".`
           : ""
       } Re-evaluate that plan with the fresh numbers below.`
-    : `The house is currently on grid ("solar" mode — at night this means the grid powers the load and the battery is untouched).`;
+    : `The inverter is currently in "solar" mode — at night the grid powers the house and the battery is kept.`;
 
   const routine =
     input.history_nights > 0
@@ -70,19 +71,11 @@ export function buildPrompt(input) {
 ${lines(input.typical_hourly_load, (h) => `  ${h.hour} ${n(h.load_w, " W")}`, "  (none)")}`
       : `No household history recorded yet. Infer the routine from the time and the current load (a household is usually most active in the evening and quieter after bedtime), and prefer a shorter recheck so the measured draw can correct you.`;
 
-  return `You manage a home solar inverter's output mode overnight in ${input.month}, at latitude ${input.latitude}°. It is ${input.now}.
-
-Output modes (priority order for powering the house):
-- "sbg": solar, then battery, then grid. At night that means the house runs from the battery, with the grid only as a fallback.
-- "solar": solar, then grid, then battery (only if both are gone). At night the grid powers the house and the battery is kept for outages.
+  return `Night decision for ${input.month}, latitude ${input.latitude}°. It is ${input.now}. At night "sbg" means the house runs from the battery; "solar" means the grid powers it and the battery is kept.
 
 Instead of an all-or-nothing call, you set a RESERVE: the house runs on battery until the battery reaches reserve_soc, then the controller automatically switches to "solar" (grid) for the rest of the night. It is completely fine if the battery would not last until sunrise — that is what the reserve is for.
 
-Goals, in order:
-1. Never go below the hard floor of ${input.floor_soc}%.
-2. Keep enough backup for load-shedding (grid outages) later tonight and early tomorrow. Size it from the recent outage history below; if outages have been frequent or long, keep more.
-3. Don't drain deeper than tomorrow's sun can refill. If tomorrow looks as sunny as recent days on which the battery filled, a lower reserve is fine. If tomorrow looks cloudy or rainy, keep more so the battery isn't left low for days.
-4. Within those limits, save as many grid units as possible by running on battery.
+Tonight the hard floor is ${input.floor_soc}%. Size the load-shedding backup from the recent outage history below (frequent or long outages → keep more). If ${input.coming_day} looks as sunny as recent days on which the battery filled, a lower reserve is fine; if it looks cloudy or rainy, keep more so the battery isn't left low for days.
 
 ${onBattery}
 
@@ -102,17 +95,17 @@ Grid outages in the last 7 days:
 ${lines(input.outages, (o) => `- ${o.when}, ${n(o.minutes, " min")}`, "- none recorded")}
 
 Weather and season:
-${weatherSection(input.weather)}
+${weatherSection(input.weather, input.coming_day)}
 Cooler nights than recent ones usually mean less fan/AC load than the learned routine; warmer means more.
 
 ${smartLoadSection(input.smart_load)}
 
 Decide:
-- mode: "sbg" to run on battery now (until reserve_soc), or "solar" to stay on grid for now (e.g. SOC is already at or near the reserve you'd want, or it's better to wait).
-- reserve_soc: the SOC to stop at and switch to grid, between ${input.floor_soc} and 95.
+- mode: "sbg" to run on battery now (until reserve_soc), or "solar" to stay in Solar mode for now, with the grid powering the house (e.g. SOC is already at or near the reserve you'd want, or it's better to wait).
+- reserve_soc: the SOC at which to switch back to "solar" mode, between ${input.floor_soc} and 95.
 - recheck_minutes: when to look again (15–120). Check sooner when the load is changing (family still awake, no history yet) or the battery is close to the reserve; later when things are steady.
-- smart_load_on_at: "HH:MM" (24-hour) for when the smart load should come on tonight.
-- reason: one or two short sentences naming the factors that drove the reserve (routine, outages, tomorrow's sun, season). Speak plainly to the homeowner.`;
+- smart_load_on_at: "HH:MM" (24-hour) for when smart load should be enabled tonight (heavy loads cut).
+- reason: one or two short sentences naming the factors that drove the reserve (routine, outages, ${input.coming_day}'s sun, season). Refer to that day as "${input.coming_day}". Speak plainly to the homeowner.`;
 }
 
 if (isMainModule(import.meta.url)) {

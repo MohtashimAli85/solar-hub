@@ -44,11 +44,7 @@ export function buildPrompt(input) {
         .join("\n")
     : "- (no recent days recorded yet)";
 
-  return `You manage a home solar inverter's output mode during the day. It is ${input.now}.
-
-Output modes (priority order for powering the house):
-- "sbg": solar, then battery, then grid. Whatever the sun doesn't cover comes out of the battery. Fine only while the sun is actually charging the battery and will fill it by sunset.
-- "solar": solar, then grid, then battery (only if both solar and grid are gone). The grid covers any shortfall, so the battery is kept and all spare solar goes into it.
+  return `Day decision. It is ${input.now}. By day "sbg" is right only while the sun is actually charging the battery and will fill it by sunset; "solar" lets the grid cover any shortfall so the battery is kept and all spare solar goes into it.
 
 The homeowner's rule of thumb: even a modest charge current (around 10 A) fills the battery before sunset when there is real sun. Only switch to "solar" when it clearly won't fill.
 

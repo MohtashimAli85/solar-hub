@@ -27,7 +27,10 @@ pub struct SmartLoadInsight {
     pub on: Option<bool>,
     pub planned_on_at: Option<NaiveDateTime>,
     pub night_on_at: Option<NaiveDateTime>,
-    pub done: bool,
+    /// The state the engine last set this window (true = enabled, heavy loads cut).
+    pub applied: Option<bool>,
+    /// Near morning with enough battery: disabled for the rest of the night.
+    pub released: bool,
 }
 
 /// What the UI shows is built from the same inputs the agent sees.
