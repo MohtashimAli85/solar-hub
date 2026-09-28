@@ -328,13 +328,39 @@ impl Engine<'_> {
     }
 
     async fn set_reason(&self, reason: &str) {
+        self.set_agent_reason(reason, None).await;
+    }
+
+    async fn set_agent_reason(&self, reason: &str, model: Option<&str>) {
         let reason = reason.to_string();
-        self.state.set_status(|status| status.ai_reason = Some(reason)).await;
+        let model = model.map(str::to_owned);
+        self.state
+            .set_status(|status| {
+                status.ai_reason = Some(reason);
+                status.ai_model = model;
+            })
+            .await;
     }
 
     #[allow(clippy::too_many_arguments)]
     fn record(
         &self,
+        at: NaiveDateTime,
+        window: Window,
+        mode: &str,
+        reserve_soc: Option<f64>,
+        recheck_minutes: Option<u32>,
+        confidence: Option<f64>,
+        applied: bool,
+        reason: &str,
+    ) {
+        self.record_by(None, at, window, mode, reserve_soc, recheck_minutes, confidence, applied, reason);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_by(
+        &self,
+        model: Option<&str>,
         at: NaiveDateTime,
         window: Window,
         mode: &str,
@@ -354,6 +380,7 @@ impl Engine<'_> {
             dry_run: self.config.dry_run,
             applied,
             reason: reason.into(),
+            model: model.map(str::to_owned),
         };
         if let Err(error) = self.state.history.append_decision(&row) {
             tracing::warn!("could not record automation decision: {error}");
@@ -810,6 +837,7 @@ struct ClampedPlan {
     confidence: f64,
     reason: String,
     smart_load_on_at: Option<String>,
+    model: Option<String>,
 }
 
 fn clamp_night_plan(plan: agent::NightPlan, config: &AutomationConfig) -> ClampedPlan {
@@ -821,6 +849,7 @@ fn clamp_night_plan(plan: agent::NightPlan, config: &AutomationConfig) -> Clampe
         confidence: plan.confidence,
         reason: plan.reason,
         smart_load_on_at: plan.smart_load_on_at,
+        model: plan.model,
     }
 }
 
@@ -1435,7 +1464,7 @@ async fn night_deciding(
     memory.night.ai_failure_notified = false;
     memory.night.last_reserve_soc = Some(plan.reserve_soc);
     remember_smart_load_time(&mut memory.night, &ctx.clock, plan.smart_load_on_at.as_deref());
-    engine.set_reason(&plan.reason).await;
+    engine.set_agent_reason(&plan.reason, plan.model.as_deref()).await;
     let recheck_at = now + chrono::Duration::minutes(plan.recheck_minutes as i64);
 
     let stay_on_grid = |memory: &mut EngineMemory| {
@@ -1443,19 +1472,19 @@ async fn night_deciding(
     };
 
     if !plan.on_battery || soc <= plan.reserve_soc {
-        engine.record(now, Window::Night, "solar", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), false, &plan.reason);
+        engine.record_by(plan.model.as_deref(), now, Window::Night, "solar", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), false, &plan.reason);
         stay_on_grid(memory);
         return until(now, memory.night.next_check_at, normal_interval(config));
     }
     if guardrails::engagement_cap_reached(memory.night.engagements) {
-        engine.record(now, Window::Night, "sbg", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), false, &plan.reason);
+        engine.record_by(plan.model.as_deref(), now, Window::Night, "sbg", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), false, &plan.reason);
         memory.night.phase = NightPhase::Paused;
         engine.notify_info("Reached tonight's battery engagement limit — staying on Solar").await;
         engine.set_phase(Phase::Paused).await;
         return normal_interval(config);
     }
     if !guardrails::can_write(reading.grid_on(), false, memory.night.last_write_at, Instant::now()) {
-        engine.record(now, Window::Night, "sbg", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), false, &plan.reason);
+        engine.record_by(plan.model.as_deref(), now, Window::Night, "sbg", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), false, &plan.reason);
         memory.night.next_check_at = Some(now + chrono::Duration::minutes(AI_RETRY_MINUTES));
         return until(now, memory.night.next_check_at, normal_interval(config));
     }
@@ -1463,7 +1492,7 @@ async fn night_deciding(
         return normal_interval(config);
     }
 
-    engine.record(now, Window::Night, "sbg", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), true, &plan.reason);
+    engine.record_by(plan.model.as_deref(), now, Window::Night, "sbg", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), true, &plan.reason);
     let night = &mut memory.night;
     if !config.dry_run {
         night.last_write_at = Some(Instant::now());
@@ -1596,14 +1625,14 @@ async fn apply_on_battery_plan(
     memory.night.ai_failures = 0;
     memory.night.ai_failure_notified = false;
     memory.night.last_reserve_soc = Some(plan.reserve_soc);
-    engine.set_reason(&plan.reason).await;
+    engine.set_agent_reason(&plan.reason, plan.model.as_deref()).await;
     let recheck_at = now + chrono::Duration::minutes(plan.recheck_minutes as i64);
 
     if !plan.on_battery || soc <= plan.reserve_soc {
         if !revert_to_solar(engine, &mut memory.night, &format!("switch to Solar — {}", plan.reason)).await {
             return normal_interval(config);
         }
-        engine.record(now, Window::Night, "solar", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), true, &plan.reason);
+        engine.record_by(plan.model.as_deref(), now, Window::Night, "solar", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), true, &plan.reason);
         memory.night.phase = NightPhase::Deciding;
         memory.night.next_check_at = Some(recheck_at);
         memory.night.verify_samples.clear();
@@ -1611,7 +1640,7 @@ async fn apply_on_battery_plan(
         return until(now, memory.night.next_check_at, normal_interval(config));
     }
 
-    engine.record(now, Window::Night, "sbg", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), false, &plan.reason);
+    engine.record_by(plan.model.as_deref(), now, Window::Night, "sbg", Some(plan.reserve_soc), Some(plan.recheck_minutes), Some(plan.confidence), false, &plan.reason);
     memory.night.plan = Some(ActivePlan {
         reserve_soc: plan.reserve_soc,
         reason: plan.reason.clone(),
@@ -1839,7 +1868,7 @@ async fn day_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &Engi
     day.ai_failure_notified = false;
     let recheck = clamp_recheck(decision.recheck_minutes);
     day.next_check_at = Some(now + chrono::Duration::minutes(recheck as i64));
-    engine.set_reason(&decision.reason).await;
+    engine.set_agent_reason(&decision.reason, decision.model.as_deref()).await;
 
     let target = if decision.mode.eq_ignore_ascii_case("sbg") { SBG_MODE } else { SOLAR_MODE };
     let applied = day.effective_mode != Some(target)
@@ -1851,7 +1880,7 @@ async fn day_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &Engi
             &format!("switch to {} — {}", output_mode_name(target), decision.reason),
         )
         .await;
-    engine.record(now, Window::Day, &decision.mode, None, Some(recheck), Some(decision.confidence), applied, &decision.reason);
+    engine.record_by(decision.model.as_deref(), now, Window::Day, &decision.mode, None, Some(recheck), Some(decision.confidence), applied, &decision.reason);
     until(now, day.next_check_at, normal_interval(config))
 }
 
@@ -2097,6 +2126,7 @@ mod tests {
             confidence: 0.8,
             reason: format!("{mode} until {reserve}"),
             smart_load_on_at: Some("22:30".into()),
+            model: Some("gemini-3.5-flash-lite".into()),
         })
     }
 
@@ -2190,6 +2220,8 @@ mod tests {
         assert_eq!(h.state.status().await.phase, Phase::NightVerifying);
         let rows = h.decisions();
         assert_eq!((rows[0].mode.as_str(), rows[0].applied), ("sbg", true));
+        assert_eq!(rows[0].model.as_deref(), Some("gemini-3.5-flash-lite"));
+        assert_eq!(h.state.status().await.ai_model.as_deref(), Some("gemini-3.5-flash-lite"));
     }
 
     #[tokio::test]
@@ -2349,6 +2381,7 @@ mod tests {
             recheck_minutes: 30.0,
             confidence: 0.7,
             reason: format!("go {mode}"),
+            model: Some("gemini-3.6-flash".into()),
         }
     }
 

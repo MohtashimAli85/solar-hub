@@ -18,6 +18,8 @@ interface FormState {
   location: string;
   gemini_api_key: string;
   has_gemini_api_key: boolean;
+  groq_api_key: string;
+  has_groq_api_key: boolean;
 }
 
 function parseLocation(value: string): { latitude: number | null; longitude: number | null } {
@@ -49,6 +51,8 @@ export function SettingsPage() {
               : "",
           gemini_api_key: "",
           has_gemini_api_key: settings.has_gemini_api_key,
+          groq_api_key: "",
+          has_groq_api_key: settings.has_groq_api_key,
         }),
       )
       .catch((caught) => setError(String(caught)));
@@ -75,6 +79,7 @@ export function SettingsPage() {
         latitude,
         longitude,
         gemini_api_key: form.gemini_api_key || undefined,
+        groq_api_key: form.groq_api_key || undefined,
       });
       setMessage("Saved. Inverter now uses the new credentials.");
       setForm((previous) => ({
@@ -82,6 +87,8 @@ export function SettingsPage() {
         password: "",
         gemini_api_key: "",
         has_gemini_api_key: settings.has_gemini_api_key,
+        groq_api_key: "",
+        has_groq_api_key: settings.has_groq_api_key,
       }));
     } catch (caught) {
       setError(`Could not save: ${String(caught)}`);
@@ -158,6 +165,15 @@ export function SettingsPage() {
                 placeholder={form.has_gemini_api_key ? "Saved — leave blank to keep" : "For the automation agent"}
                 value={form.gemini_api_key}
                 onChange={(event) => set({ gemini_api_key: event.target.value })}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Groq API key (optional)</Label>
+              <Input
+                type="password"
+                placeholder={form.has_groq_api_key ? "Saved — leave blank to keep" : "Backup when Gemini is busy"}
+                value={form.groq_api_key}
+                onChange={(event) => set({ groq_api_key: event.target.value })}
               />
             </div>
           </fieldset>

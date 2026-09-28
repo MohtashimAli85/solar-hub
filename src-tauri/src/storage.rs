@@ -24,6 +24,8 @@ pub struct AppSettings {
     pub longitude: Option<f64>,
     #[serde(skip)]
     pub has_gemini_api_key: bool,
+    #[serde(skip)]
+    pub has_groq_api_key: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -113,6 +115,7 @@ pub fn save_remote_config(app: &AppHandle, config: &RemoteConfig) -> Result<(), 
 const KEYCHAIN_SERVICE: &str = "com.mohtashimali.solarhub";
 const SOLAR_PASSWORD_ACCOUNT: &str = "solar-password";
 const GEMINI_API_KEY_ACCOUNT: &str = "gemini-api-key";
+const GROQ_API_KEY_ACCOUNT: &str = "groq-api-key";
 
 fn keychain_get(account: &str) -> Result<Option<String>, String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|error| error.to_string())?;
@@ -137,26 +140,35 @@ fn keychain_clear(account: &str) -> Result<(), String> {
     }
 }
 
+/// Stores a secret, or removes it when `value` is empty.
+fn keychain_save(account: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        keychain_clear(account)
+    } else {
+        keychain_set(account, value)
+    }
+}
+
 pub fn get_solar_password() -> Result<Option<String>, String> {
     keychain_get(SOLAR_PASSWORD_ACCOUNT)
 }
 
-pub fn set_solar_password(password: &str) -> Result<(), String> {
-    keychain_set(SOLAR_PASSWORD_ACCOUNT, password)
-}
-
-pub fn clear_solar_password() -> Result<(), String> {
-    keychain_clear(SOLAR_PASSWORD_ACCOUNT)
+pub fn save_solar_password(password: &str) -> Result<(), String> {
+    keychain_save(SOLAR_PASSWORD_ACCOUNT, password)
 }
 
 pub fn get_gemini_api_key() -> Result<Option<String>, String> {
     keychain_get(GEMINI_API_KEY_ACCOUNT)
 }
 
-pub fn set_gemini_api_key(key: &str) -> Result<(), String> {
-    keychain_set(GEMINI_API_KEY_ACCOUNT, key)
+pub fn save_gemini_api_key(key: &str) -> Result<(), String> {
+    keychain_save(GEMINI_API_KEY_ACCOUNT, key)
 }
 
-pub fn clear_gemini_api_key() -> Result<(), String> {
-    keychain_clear(GEMINI_API_KEY_ACCOUNT)
+pub fn get_groq_api_key() -> Result<Option<String>, String> {
+    keychain_get(GROQ_API_KEY_ACCOUNT)
+}
+
+pub fn save_groq_api_key(key: &str) -> Result<(), String> {
+    keychain_save(GROQ_API_KEY_ACCOUNT, key)
 }

@@ -39,16 +39,21 @@ impl AgentError {
 }
 
 /// Turns a failed script's stderr into the likely cause.
+/// Names why the agent script failed. The script tries several models, so
+/// stderr can hold mixed errors; an overloaded model wins over a dropped
+/// connection, since the other models were reachable.
 fn classify_failure(stderr: &str) -> &'static str {
     let text = stderr.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
-    if has(&["econnreset", "enotfound", "etimedout", "eai_again", "econnrefused", "fetch failed", "network", "socket"]) {
+    if has(&["unavailable", "overloaded", "high demand", "\"code\":503", "status: 503", "timeouterror", "operation was aborted"]) {
+        "Gemini is busy or down"
+    } else if has(&["econnreset", "enotfound", "etimedout", "eai_again", "econnrefused", "fetch failed", "network", "socket"]) {
         "no internet connection"
     } else if has(&["api_key_invalid", "api key not valid", "permission_denied", "401", "403", "gemini_api_key is not set"]) {
         "Gemini rejected the API key"
     } else if has(&["429", "resource_exhausted", "quota", "rate limit"]) {
         "Gemini quota or rate limit reached"
-    } else if has(&["503", "500", "unavailable", "overloaded", "internal"]) {
+    } else if has(&["\"code\":500", "status: 500", "internal error"]) {
         "Gemini is busy or down"
     } else {
         "the AI script failed — see the log"
@@ -210,6 +215,8 @@ pub struct NightPlan {
     pub reason: String,
     #[serde(default)]
     pub smart_load_on_at: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -248,6 +255,8 @@ pub struct DayDecision {
     pub recheck_minutes: f64,
     pub confidence: f64,
     pub reason: String,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 pub trait AgentRunner: Send + Sync {
@@ -272,35 +281,40 @@ impl Default for NodeAgent {
 
 impl AgentRunner for NodeAgent {
     fn run_sun(&self, input: SunInput) -> BoxFuture<'_, Result<SunInfo, AgentError>> {
-        Box::pin(async move { run_script("sun.js", &input, None).await })
+        Box::pin(async move { run_script("sun.js", &input, &[]).await })
     }
 
     fn run_night(&self, input: NightInput) -> BoxFuture<'_, Result<NightPlan, AgentError>> {
         Box::pin(async move {
-            let key = gemini_key()?;
-            run_script("night.js", &input, Some(&key)).await
+            run_script("night.js", &input, &model_keys()?).await
         })
     }
 
     fn run_day(&self, input: DayInput) -> BoxFuture<'_, Result<DayDecision, AgentError>> {
         Box::pin(async move {
-            let key = gemini_key()?;
-            run_script("day.js", &input, Some(&key)).await
+            run_script("day.js", &input, &model_keys()?).await
         })
     }
 }
 
-fn gemini_key() -> Result<String, AgentError> {
-    crate::storage::get_gemini_api_key()
+/// The API keys handed to the agent script as environment variables. Gemini
+/// is required; Groq is an optional fallback.
+fn model_keys() -> Result<Vec<(&'static str, String)>, AgentError> {
+    let gemini = crate::storage::get_gemini_api_key()
         .map_err(AgentError::ScriptFailed)?
-        .ok_or_else(|| AgentError::ScriptFailed("GEMINI_API_KEY is not set".into()))
+        .ok_or_else(|| AgentError::ScriptFailed("GEMINI_API_KEY is not set".into()))?;
+    let mut keys = vec![("GEMINI_API_KEY", gemini)];
+    if let Ok(Some(groq)) = crate::storage::get_groq_api_key() {
+        keys.push(("GROQ_API_KEY", groq));
+    }
+    Ok(keys)
 }
 
 fn agent_dir() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../agent"))
 }
 
-async fn run_script<I, O>(script: &str, input: &I, gemini_key: Option<&str>) -> Result<O, AgentError>
+async fn run_script<I, O>(script: &str, input: &I, keys: &[(&str, String)]) -> Result<O, AgentError>
 where
     I: Serialize,
     O: DeserializeOwned,
@@ -311,7 +325,7 @@ where
         if attempt > 1 {
             tokio::time::sleep(RETRY_DELAY).await;
         }
-        match run_once(script, &payload, gemini_key).await {
+        match run_once(script, &payload, keys).await {
             Ok(bytes) => return Ok(serde_json::from_slice(&bytes)?),
             Err(error) => {
                 tracing::warn!("{script} attempt {attempt}/2 failed: {error}");
@@ -325,7 +339,7 @@ where
     Err(last_error)
 }
 
-async fn run_once(script: &str, payload: &[u8], gemini_key: Option<&str>) -> Result<Vec<u8>, AgentError> {
+async fn run_once(script: &str, payload: &[u8], keys: &[(&str, String)]) -> Result<Vec<u8>, AgentError> {
     let mut last_error = AgentError::NodeNotFound;
     for node in NODE_CANDIDATES {
         let mut command = Command::new(node);
@@ -335,10 +349,8 @@ async fn run_once(script: &str, payload: &[u8], gemini_key: Option<&str>) -> Res
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(key) = gemini_key {
-            command.env("GEMINI_API_KEY", key);
-        }
+            .kill_on_drop(true)
+            .envs(keys.iter().map(|(name, value)| (*name, value.as_str())));
 
         let mut child = match command.spawn() {
             Ok(child) => child,
@@ -382,5 +394,17 @@ mod tests {
         assert_eq!(classify_failure("got status: 429 RESOURCE_EXHAUSTED"), "Gemini quota or rate limit reached");
         assert_eq!(classify_failure("got status: 503 UNAVAILABLE. The model is overloaded"), "Gemini is busy or down");
         assert_eq!(classify_failure("SyntaxError: Unexpected token"), "the AI script failed — see the log");
+    }
+
+    #[test]
+    fn mixed_model_failures_report_the_overload() {
+        let mixed = "gemini-3.5-flash-lite failed after 624ms: 503 {\"error\":{\"code\":503,\"status\":\"UNAVAILABLE\"}}\n\
+                     gemini-3.1-flash-lite failed after 900ms: TypeError fetch failed ECONNRESET at node:internal/process/task_queues";
+        assert_eq!(classify_failure(mixed), "Gemini is busy or down");
+        let timed_out = "gemma-4-26b-a4b-it failed after 15001ms: TimeoutError The operation was aborted due to timeout";
+        assert_eq!(classify_failure(timed_out), "Gemini is busy or down");
+        let offline = "TypeError: fetch failed at node:internal/deps/undici ENOTFOUND generativelanguage.googleapis.com";
+        assert_eq!(classify_failure(offline), "no internet connection", "a node stack trace isn't a server error");
+        assert_eq!(classify_failure("ApiError: {\"error\":{\"code\":500,\"status\":\"INTERNAL\"}}"), "Gemini is busy or down");
     }
 }

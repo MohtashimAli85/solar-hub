@@ -7,8 +7,8 @@ use super::InverterState;
 use crate::battery::BatteryState;
 use crate::events;
 use crate::storage::{
-    clear_gemini_api_key, clear_solar_password, get_gemini_api_key, get_solar_password,
-    load_app_settings, save_app_settings, set_gemini_api_key, set_solar_password, AppSettings,
+    get_gemini_api_key, get_groq_api_key, get_solar_password, load_app_settings, save_app_settings,
+    save_gemini_api_key, save_groq_api_key, save_solar_password, AppSettings,
 };
 
 #[tauri::command]
@@ -204,15 +204,26 @@ pub struct SolarSettingsInput {
     pub longitude: Option<f64>,
     #[serde(default)]
     pub gemini_api_key: Option<String>,
+    #[serde(default)]
+    pub groq_api_key: Option<String>,
+}
+
+/// Secrets live in the OS keychain and are never returned; the UI only learns
+/// whether each one is saved.
+fn with_secret_flags(mut settings: AppSettings) -> Result<AppSettings, String> {
+    settings.has_gemini_api_key = get_gemini_api_key()?.is_some();
+    settings.has_groq_api_key = get_groq_api_key()?.is_some();
+    Ok(settings)
+}
+
+/// `None` keeps the saved secret; an empty string removes it.
+fn save_secret(value: Option<String>, save: fn(&str) -> Result<(), String>) -> Result<(), String> {
+    value.map_or(Ok(()), |value| save(&value))
 }
 
 #[tauri::command]
 pub async fn get_solar_settings(app: AppHandle) -> Result<AppSettings, String> {
-    // The password and Gemini key are intentionally not returned — they live
-    // in the OS keychain and are only read by their clients at request time.
-    let mut settings = load_app_settings(&app);
-    settings.has_gemini_api_key = get_gemini_api_key()?.is_some();
-    Ok(settings)
+    with_secret_flags(load_app_settings(&app))
 }
 
 #[tauri::command]
@@ -231,20 +242,9 @@ pub async fn update_solar_settings(
         ..load_app_settings(&app)
     };
     save_app_settings(&app, &settings)?;
-    if let Some(password) = input.password {
-        if password.is_empty() {
-            clear_solar_password()?;
-        } else {
-            set_solar_password(&password)?;
-        }
-    }
-    if let Some(gemini_api_key) = input.gemini_api_key {
-        if gemini_api_key.is_empty() {
-            clear_gemini_api_key()?;
-        } else {
-            set_gemini_api_key(&gemini_api_key)?;
-        }
-    }
+    save_secret(input.password, save_solar_password)?;
+    save_secret(input.gemini_api_key, save_gemini_api_key)?;
+    save_secret(input.groq_api_key, save_groq_api_key)?;
     let stored_password = get_solar_password()
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
@@ -256,7 +256,5 @@ pub async fn update_solar_settings(
         time_zone: settings.time_zone.clone(),
     };
     state.solar_client().set_credentials(credentials).await;
-    let mut settings = settings;
-    settings.has_gemini_api_key = get_gemini_api_key()?.is_some();
-    Ok(settings)
+    with_secret_flags(settings)
 }

@@ -112,6 +112,7 @@ export interface AutomationStatus {
   sunset: string | null;
   blocked_reason: string | null;
   ai_reason: string | null;
+  ai_model: string | null;
   reserve_soc: number | null;
   next_check_at: string | null;
   boost_until: string | null;
@@ -240,6 +241,7 @@ export interface AutomationDecision {
   dry_run: boolean;
   applied: boolean;
   reason: string;
+  model: string | null;
 }
 
 export interface AppSettings {
@@ -252,6 +254,7 @@ export interface AppSettings {
   latitude: number | null;
   longitude: number | null;
   has_gemini_api_key: boolean;
+  has_groq_api_key: boolean;
 }
 
 export interface RemoteStatus {
@@ -273,6 +276,7 @@ export interface SolarSettingsInput {
   latitude?: number | null;
   longitude?: number | null;
   gemini_api_key?: string;
+  groq_api_key?: string;
 }
 
 export interface DeviceDetails {

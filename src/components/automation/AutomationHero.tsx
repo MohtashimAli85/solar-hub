@@ -7,7 +7,7 @@ import type { AutomationConfig, AutomationInsights, AutomationStatus } from "@/l
 import { cn } from "@/lib/utils";
 import { FlaskConical, RefreshCw, Settings } from "lucide-react";
 import { BudgetBar } from "./BudgetBar";
-import { automationPhaseLabel, clock, PHASE_VARIANTS, relativeUntil, Skeleton } from "./shared";
+import { automationPhaseLabel, clock, modelLabel, PHASE_VARIANTS, relativeUntil, Skeleton } from "./shared";
 
 interface AutomationHeroProps {
   status: AutomationStatus;
@@ -152,7 +152,13 @@ export function AutomationHero({
             {headline}
           </p>
           <p className="text-sm text-muted-foreground">
-            {[modeLine(status), status.last_event ? `last: ${status.last_event.message}` : null].filter(Boolean).join(" · ")}
+            {[
+              modeLine(status),
+              !blocked && status.enabled && status.ai_model ? `decided by ${modelLabel(status.ai_model)}` : null,
+              status.last_event ? `last: ${status.last_event.message}` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
           </p>
           {blocked ? (
             <Button size="sm" variant="outline" onClick={onOpenSettings}>

@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import type { AutomationDecision } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Moon, Sun } from "lucide-react";
-import { clock, EmptyNote, SectionTitle, Skeleton } from "./shared";
+import { clock, EmptyNote, modelLabel, SectionTitle, Skeleton } from "./shared";
 
 const MODE_LABELS: Record<string, string> = {
   sbg: "Battery",
@@ -86,6 +86,9 @@ export function DecisionTimeline({ decisions, canShowMore, onShowMore }: Decisio
                       {decision.dry_run ? <span className="text-micro uppercase tracking-wide text-sky-600 dark:text-sky-400">dry run</span> : null}
                     </div>
                     <p className="text-sm leading-snug">{decision.reason}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {decision.model ? `Decided by ${modelLabel(decision.model)}` : "Decided by the app's own rules"}
+                    </p>
                   </div>
                 </li>
               );

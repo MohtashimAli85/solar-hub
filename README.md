@@ -16,7 +16,7 @@ JBD BMS over Bluetooth.
 | **Battery** | Pack health, cell voltages and balance, temperatures, protection flags and short trend charts from the BMS. |
 | **Inverter** | Live power flows (solar in, house load, grid), output source, device summary, advanced charger/cutoff settings and every raw field from the cloud. |
 | **Automation** | Tonight's plan and battery projection, the day check, the household routine it has learned, the weather outlook, recent outages, a log of every decision and why, the CSV records folder, and all automation settings. |
-| **Settings** | Solar cloud account, location and Gemini API key. |
+| **Settings** | Solar cloud account, location, Gemini API key, and an optional Groq API key used as a backup. |
 
 macOS notifications fire for grid off/back, low battery, high discharge,
 battery temperature, BMS protection and every automation switch.
@@ -256,7 +256,7 @@ catching short outages.
 ├── samples/2026-09.csv     timestamp, soc_pct, load_w, pv_w, battery_a, battery_v,
 │                           grid_on, grid_basis, mode, source
 ├── decisions/2026-09.csv   timestamp, window, mode, reserve_soc, recheck_minutes,
-│                           confidence, dry_run, applied, reason
+│                           confidence, dry_run, applied, reason, model
 └── energy/
     ├── 2026-09.csv         date, grid_units, meter1_units, meter2_units,
     │                       unassigned_units, house_kwh, solar_kwh, battery_kwh,
@@ -374,6 +374,38 @@ The Rust engine runs the whole state machine and pre-computes everything the
 model needs: the battery trajectory, routine, outages, forecast summary and
 sunset projection. The model reasons rather than doing arithmetic. Rust calls
 the Node scripts on demand and passes JSON over stdin/stdout.
+
+**Models.** Each call tries these models in order until one answers. Groq's
+120B goes first because it answers in a few seconds, while Google's free tier
+often answers 503 "high demand". Groq's 20B is fast but follows the rules
+less closely, so it comes after Gemini Flash Lite. Each has its own free-tier
+allowance.
+
+| Order | Model | Free-tier limits |
+|---|---|---|
+| 1 | Groq `openai/gpt-oss-120b` (only with a Groq key) | 1,000 a day, 8,000 tokens a minute |
+| 2 | `gemini-3.5-flash-lite` | 15 a minute, 500 a day |
+| 3 | `gemini-3.1-flash-lite` | 15 a minute, 500 a day |
+| 4 | Groq `openai/gpt-oss-20b` (only with a Groq key) | 1,000 a day, 8,000 tokens a minute |
+| 5–8 | `gemini-3.8-flash`, `3.7-flash`, `3.6-flash`, `3.5-flash` | 5 a minute, 20 a day each |
+| 9 | `gemma-4-26b-a4b-it` | 30 a minute, 14,400 a day |
+
+An overloaded model fails in a second or two. Each Gemini attempt gets up to
+12 seconds, and Gemma always keeps 20 seconds in reserve. Gemma is last
+because it keeps answering when Gemini is busy, but its reasons read worse.
+Everything fits in 50 seconds. Gemini 2.5 Flash and 2.5 Flash Lite still
+show on the limits page, but new API keys get 404 "no longer available to
+new users". The list is `MODELS` in `agent/lib.js`; each provider (Gemini,
+Groq) is one small function there. A Groq key is optional: add it in Settings
+(it's stored in the macOS Keychain like the Gemini key), and without it those
+two models are skipped. A bad key or rejected request skips the rest of that
+provider's models, not the other provider's.
+
+Every decision records **which model made it**. The Automation tab shows it
+under each decision ("Decided by Gemini 3.1 Flash Lite", or "the app's own
+rules" for the engine's fixed rules), and the `decisions` CSV has a `model`
+column. If every model fails, the app shows why ("Gemini is busy or down",
+"no internet connection", …) and tries again at the next check.
 
 ## Development
 

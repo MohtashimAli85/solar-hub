@@ -25,6 +25,20 @@ export const PHASE_VARIANTS: Record<AutomationPhase, "secondary" | "info" | "suc
   blocked: "destructive",
 };
 
+/** "gemini-3.5-flash-lite" → "Gemini 3.5 Flash Lite", "gemma-4-26b-a4b-it" → "Gemma 4 26B". */
+export function modelLabel(id: string | null | undefined): string | null {
+  if (!id) return null;
+  const gemma = /^gemma-(\d+)-(\d+)b/i.exec(id);
+  if (gemma) return `Gemma ${gemma[1]} ${gemma[2]}B`;
+  const gptOss = /gpt-oss-(\d+)b/i.exec(id);
+  if (gptOss) return `GPT-OSS ${gptOss[1]}B (Groq)`;
+  return id
+    .split("-")
+    .filter((part) => part !== "preview")
+    .map((part) => (/^\d/.test(part) ? part : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join(" ");
+}
+
 export function automationPhaseLabel(phase: AutomationPhase): string {
   return PHASE_LABELS[phase] ?? phase;
 }

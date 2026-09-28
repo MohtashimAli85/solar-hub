@@ -51,6 +51,8 @@ pub struct AutomationStatus {
     pub sunset: Option<String>,
     pub blocked_reason: Option<String>,
     pub ai_reason: Option<String>,
+    /// The model behind `ai_reason`; none when the engine's own rule decided.
+    pub ai_model: Option<String>,
     pub reserve_soc: Option<f64>,
     pub next_check_at: Option<NaiveDateTime>,
     pub boost_until: Option<NaiveDateTime>,
@@ -72,6 +74,7 @@ impl Default for AutomationStatus {
             sunset: None,
             blocked_reason: None,
             ai_reason: None,
+            ai_model: None,
             reserve_soc: None,
             next_check_at: None,
             boost_until: None,

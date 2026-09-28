@@ -7,7 +7,10 @@ use serde::Serialize;
 
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const SAMPLE_HEADER: &str = "timestamp,soc_pct,load_w,pv_w,battery_a,battery_v,grid_on,grid_basis,mode,source";
-const DECISION_HEADER: &str = "timestamp,window,mode,reserve_soc,recheck_minutes,confidence,dry_run,applied,reason";
+const DECISION_HEADER: &str = "timestamp,window,mode,reserve_soc,recheck_minutes,confidence,dry_run,applied,reason,model";
+/// Decision files written before the `model` column; their header is widened
+/// in place the next time a row is added, and old rows read with no model.
+const LEGACY_DECISION_HEADER: &str = "timestamp,window,mode,reserve_soc,recheck_minutes,confidence,dry_run,applied,reason";
 const NIGHT_HOURS: [u32; 15] = [17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7];
 const DAY_HOURS: [u32; 14] = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 const MIN_HOURS_FOR_A_NIGHT: usize = 3;
@@ -43,6 +46,8 @@ pub struct DecisionRow {
     pub dry_run: bool,
     pub applied: bool,
     pub reason: String,
+    /// The AI model that made the decision; empty for the engine's own rules.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +86,13 @@ impl HistoryStore {
     }
 
     pub fn append_decision(&self, row: &DecisionRow) -> std::io::Result<()> {
+        let path = self.month_file("decisions", row.at.date());
+        if let Ok(text) = fs::read_to_string(&path) {
+            if text.lines().next() == Some(LEGACY_DECISION_HEADER) {
+                let rest = &text[LEGACY_DECISION_HEADER.len()..];
+                fs::write(&path, format!("{DECISION_HEADER}{rest}"))?;
+            }
+        }
         self.append("decisions", DECISION_HEADER, row.at.date(), &decision_to_csv(row))
     }
 
@@ -161,6 +173,7 @@ fn decision_to_csv(row: &DecisionRow) -> String {
         (row.dry_run as u8).to_string(),
         (row.applied as u8).to_string(),
         quote(&row.reason),
+        quote(row.model.as_deref().unwrap_or("")),
     ]
     .join(",")
 }
@@ -232,6 +245,7 @@ fn parse_decision(line: &str) -> Option<DecisionRow> {
         dry_run: f[6].trim() == "1",
         applied: f[7].trim() == "1",
         reason: f[8].clone(),
+        model: f.get(9).and_then(|text| opt_text(text)),
     })
 }
 
@@ -553,8 +567,38 @@ mod tests {
             dry_run: true,
             applied: false,
             reason: "Family awake, \"quiet\" by 23:00, sunny tomorrow".into(),
+            model: Some("gemini-3.5-flash-lite".into()),
         };
         assert_eq!(parse_decision(&decision_to_csv(&row)), Some(row));
+    }
+
+    #[test]
+    fn old_decision_files_gain_the_model_column_and_keep_their_rows() {
+        let dir = std::env::temp_dir().join(format!("solar-hub-history-{}", uuid::Uuid::new_v4()));
+        let store = HistoryStore::new(dir.clone());
+        let path = dir.join("decisions").join("2026-09.csv");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, format!("{LEGACY_DECISION_HEADER}\n2026-09-20 21:05:00,night,sbg,35,60,0.80,1,1,\"Old, quoted\"\n")).unwrap();
+        let row = DecisionRow {
+            at: at(20, 22, 0),
+            window: "night".into(),
+            mode: "solar".into(),
+            reserve_soc: None,
+            recheck_minutes: None,
+            confidence: None,
+            dry_run: true,
+            applied: true,
+            reason: "Reserve reached".into(),
+            model: Some("gemma-4-26b-a4b-it".into()),
+        };
+        store.append_decision(&row).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(&format!("{DECISION_HEADER}\n2026-09-20 21:05:00")));
+        let rows = store.recent_decisions(at(20, 23, 0).date(), 10);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].model.as_deref(), Some("gemma-4-26b-a4b-it"));
+        assert_eq!((rows[1].reason.as_str(), rows[1].model.clone()), ("Old, quoted", None));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
