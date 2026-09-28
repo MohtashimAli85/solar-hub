@@ -26,6 +26,7 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
         connection={battery.connection}
         inverter={inverter.snapshot ?? null}
         inverterUpdatedAt={inverter.updatedAt}
+        sunset={automation.status?.sunset ?? null}
         batteryLoading={battery.isLoading}
         inverterLoading={inverter.isLoading}
       />

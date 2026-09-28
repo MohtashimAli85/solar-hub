@@ -10,7 +10,7 @@ function planLine(status: AutomationStatus): string | null {
   }
   if (status.phase === "night_reserve") return "Reserve kept — Solar mode for the rest of the night";
   if (status.phase === "day") {
-    return status.effective_mode === "SBG" ? "SBG — the sun is charging the battery" : "Solar — grid covers the house, battery kept";
+    return status.effective_mode === "SBG" ? "SBG — the sun is charging the battery" : "Solar mode — battery kept for tonight";
   }
   return null;
 }

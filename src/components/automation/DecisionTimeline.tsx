@@ -7,6 +7,7 @@ import { clock, EmptyNote, SectionTitle, Skeleton } from "./shared";
 
 const MODE_LABELS: Record<string, string> = {
   sbg: "Battery",
+  solar: "Solar",
   boost_sbg: "Battery · oven boost",
   smart_load_on: "Smart load on · heavy loads cut",
   smart_load_off: "Smart load off · everything runs",
@@ -50,7 +51,7 @@ export function DecisionTimeline({ decisions, canShowMore, onShowMore }: Decisio
           <ol className="space-y-0">
             {decisions.map((decision) => {
               const Icon = decision.window === "night" ? Moon : Sun;
-              const label = MODE_LABELS[decision.mode] ?? "Grid";
+              const label = MODE_LABELS[decision.mode] ?? decision.mode;
               return (
                 <li
                   key={`${decision.at}-${decision.mode}-${decision.reason.slice(0, 12)}`}

@@ -13,6 +13,7 @@ interface CommandHeroProps {
   connection: ConnectionStatus | null;
   inverter: InverterSnapshot | null;
   inverterUpdatedAt: number | null;
+  sunset: string | null;
   batteryLoading: boolean;
   inverterLoading: boolean;
 }
@@ -39,7 +40,7 @@ function ageText(updatedAt: number | null, now: number): string | null {
   return `updated ${fmtDuration(seconds / 60)} ago`;
 }
 
-export function CommandHero({ battery, connection, inverter, inverterUpdatedAt, batteryLoading, inverterLoading }: CommandHeroProps) {
+export function CommandHero({ battery, connection, inverter, inverterUpdatedAt, sunset, batteryLoading, inverterLoading }: CommandHeroProps) {
   const now = useNow(10_000);
   const fields = inverter?.fields ?? {};
   const bmsOk = connection?.connected ?? battery != null;
@@ -59,7 +60,7 @@ export function CommandHero({ battery, connection, inverter, inverterUpdatedAt, 
 
       <div className="grid grid-cols-1 sm:grid-cols-2 sm:divide-x lg:grid-cols-4">
         <BatteryColumn battery={battery} loading={batteryLoading} />
-        <RateColumn battery={battery} loading={batteryLoading} now={now} />
+        <RateColumn battery={battery} loading={batteryLoading} now={now} sunset={sunset} />
         <SolarColumn inverter={inverter} loading={inverterLoading} fields={fields} />
         <HouseColumn inverter={inverter} loading={inverterLoading} fields={fields} />
       </div>
@@ -118,7 +119,7 @@ function BatteryColumn({ battery, loading }: { battery: BatterySnapshot | null; 
   );
 }
 
-function RateColumn({ battery, loading, now }: { battery: BatterySnapshot | null; loading: boolean; now: number }) {
+function RateColumn({ battery, loading, now, sunset }: { battery: BatterySnapshot | null; loading: boolean; now: number; sunset: string | null }) {
   if (loading) {
     return (
       <Column label="Charge / discharge">
@@ -135,7 +136,8 @@ function RateColumn({ battery, loading, now }: { battery: BatterySnapshot | null
   }
   const state = chargeState(battery.current);
   const watts = battery.voltage * battery.current;
-  const eta = describeEta(batteryEta(battery, now), now);
+  const sunsetMs = sunset ? new Date(sunset).getTime() : NaN;
+  const eta = describeEta(batteryEta(battery, now), now, Number.isFinite(sunsetMs) && sunsetMs > now ? sunsetMs : null);
   const tone =
     state === "charging" ? "text-amber-600 dark:text-amber-400" : state === "discharging" ? "text-sky-600 dark:text-sky-400" : "text-muted-foreground";
   const flow = state === "charging" ? `${fmtWatts(watts)} into the battery` : state === "discharging" ? `${fmtWatts(watts)} from the battery` : "no flow";

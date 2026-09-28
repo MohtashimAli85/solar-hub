@@ -11,6 +11,9 @@ export type BatteryEta =
   | { kind: "full" }
   | { kind: "steady" };
 
+/** A charge rate this slow is just the sun right now; extrapolating it past this point is noise. */
+const SLOW_CHARGE_LIMIT_MINUTES = 12 * 60;
+
 /** Time until 15% while discharging, or until full while charging, at the current rate. */
 export function batteryEta(battery: BatterySnapshot, now = Date.now()): BatteryEta {
   const { current, remaining_capacity: remaining, rated_capacity: rated } = battery;
@@ -39,10 +42,16 @@ function clockText(at: Date, now: number): string {
   return `around ${at.toLocaleDateString("en-US", { weekday: "short" })} ${time}`;
 }
 
-export function etaDuration(eta: BatteryEta): string {
+/** Charging can't continue past sunset; without a sunset, a very slow rate is treated the same way. */
+function fillsInTime(eta: Extract<BatteryEta, { kind: "charging" }>, sunset: number | null): boolean {
+  return sunset != null ? eta.at.getTime() <= sunset : eta.minutes <= SLOW_CHARGE_LIMIT_MINUTES;
+}
+
+export function etaDuration(eta: BatteryEta, sunset: number | null = null): string {
   switch (eta.kind) {
-    case "discharging":
     case "charging":
+      return fillsInTime(eta, sunset) ? `~${fmtDuration(eta.minutes)}` : "Not today at this rate";
+    case "discharging":
       return eta.minutes >= 24 * 60 ? "over a day" : `~${fmtDuration(eta.minutes)}`;
     case "below_target":
       return `Below ${EMPTY_TARGET_PERCENT}%`;
@@ -53,7 +62,11 @@ export function etaDuration(eta: BatteryEta): string {
   }
 }
 
-export function describeEta(eta: BatteryEta, now = Date.now()): { headline: string; detail: string | null } {
+export function describeEta(
+  eta: BatteryEta,
+  now = Date.now(),
+  sunset: number | null = null,
+): { headline: string; detail: string | null } {
   switch (eta.kind) {
     case "discharging":
       return {
@@ -61,9 +74,15 @@ export function describeEta(eta: BatteryEta, now = Date.now()): { headline: stri
         detail: eta.minutes >= 24 * 60 ? "at the current draw" : `${clockText(eta.at, now)} · at the current draw`,
       };
     case "charging":
+      if (!fillsInTime(eta, sunset)) {
+        return {
+          headline: sunset != null ? "Won't be full by sunset at this rate" : "Won't be full today at this rate",
+          detail: "charging slowly right now — more sun will speed it up",
+        };
+      }
       return {
-        headline: `Full in ${eta.minutes >= 24 * 60 ? "over a day" : `~${fmtDuration(eta.minutes)}`}`,
-        detail: eta.minutes >= 24 * 60 ? "at the current charge rate" : `${clockText(eta.at, now)} · at the current charge rate`,
+        headline: `Full in ~${fmtDuration(eta.minutes)}`,
+        detail: `${clockText(eta.at, now)} · at the current charge rate`,
       };
     case "below_target":
       return { headline: `Below ${EMPTY_TARGET_PERCENT}%`, detail: "the inverter may cut off soon" };
