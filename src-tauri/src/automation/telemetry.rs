@@ -199,7 +199,7 @@ pub struct SocPoint {
 }
 
 fn next_hour(at: NaiveDateTime) -> NaiveDateTime {
-    at.with_minute(0).and_then(|t| t.with_second(0)).unwrap_or(at) + Duration::hours(1)
+    at.date().and_hms_opt(at.hour(), 0, 0).unwrap_or(at) + Duration::hours(1)
 }
 
 /// Hour-by-hour SOC if the house runs on battery from `start` to `end`,

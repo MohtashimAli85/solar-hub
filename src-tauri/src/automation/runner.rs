@@ -579,7 +579,7 @@ async fn tick(
     settings: &AppSettings,
     memory: &mut EngineMemory,
 ) -> Duration {
-    let now = Local::now().naive_local();
+    let now = Local::now().naive_local().with_nanosecond(0).unwrap_or_else(|| Local::now().naive_local());
     let bms = if services.battery.connection_status().await.connected {
         services.battery.latest_snapshot().await
     } else {

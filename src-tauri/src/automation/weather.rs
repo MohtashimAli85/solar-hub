@@ -116,7 +116,7 @@ impl Forecast {
 
     /// Mean radiation (W/m²) during the hour that contains `at`.
     pub fn radiation_during(&self, at: NaiveDateTime) -> Option<f64> {
-        let hour_end = at.with_minute(0)?.with_second(0)? + Duration::hours(1);
+        let hour_end = at.date().and_hms_opt(at.hour(), 0, 0)? + Duration::hours(1);
         self.hourly.iter().find(|h| h.at == hour_end).and_then(|h| h.radiation_w_m2)
     }
 
@@ -305,6 +305,13 @@ mod tests {
         let forecast = parse(&fixture()).unwrap();
         assert_eq!(forecast.radiation_during(at(20, 10) + Duration::minutes(20)), Some(600.0));
         assert_eq!(forecast.radiation_during(at(20, 22)), Some(0.0));
+    }
+
+    #[test]
+    fn radiation_lookup_works_with_a_live_clock_that_has_fractional_seconds() {
+        let forecast = parse(&fixture()).unwrap();
+        let live = (at(20, 10) + Duration::minutes(20)).with_nanosecond(123_456_789).unwrap();
+        assert_eq!(forecast.radiation_during(live), Some(600.0));
     }
 
     #[test]
