@@ -8,6 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
+const RETRY_DELAY: Duration = Duration::from_secs(20);
 const NODE_CANDIDATES: &[&str] = &["node", "/opt/homebrew/bin/node", "/usr/local/bin/node"];
 
 #[derive(Debug, thiserror::Error)]
@@ -22,6 +23,36 @@ pub enum AgentError {
     Io(#[from] std::io::Error),
     #[error("agent output was not valid: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl AgentError {
+    /// A short cause the homeowner can act on, for notifications.
+    pub fn user_reason(&self) -> String {
+        match self {
+            AgentError::NodeNotFound => "Node.js wasn't found".into(),
+            AgentError::ScriptFailed(summary) => summary.clone(),
+            AgentError::Timeout => "the AI took too long to answer".into(),
+            AgentError::Io(_) => "couldn't start the AI script".into(),
+            AgentError::Json(_) => "the AI's answer wasn't valid".into(),
+        }
+    }
+}
+
+/// Turns a failed script's stderr into the likely cause.
+fn classify_failure(stderr: &str) -> &'static str {
+    let text = stderr.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if has(&["econnreset", "enotfound", "etimedout", "eai_again", "econnrefused", "fetch failed", "network", "socket"]) {
+        "no internet connection"
+    } else if has(&["api_key_invalid", "api key not valid", "permission_denied", "401", "403", "gemini_api_key is not set"]) {
+        "Gemini rejected the API key"
+    } else if has(&["429", "resource_exhausted", "quota", "rate limit"]) {
+        "Gemini quota or rate limit reached"
+    } else if has(&["503", "500", "unavailable", "overloaded", "internal"]) {
+        "Gemini is busy or down"
+    } else {
+        "the AI script failed — see the log"
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,11 +277,17 @@ where
 {
     let payload = serde_json::to_vec(input)?;
     let mut last_error = AgentError::NodeNotFound;
-    for _ in 0..2 {
+    for attempt in 1..=2 {
+        if attempt > 1 {
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
         match run_once(script, &payload, gemini_key).await {
             Ok(bytes) => return Ok(serde_json::from_slice(&bytes)?),
             Err(error) => {
-                tracing::warn!("{script} attempt failed: {error}");
+                tracing::warn!("{script} attempt {attempt}/2 failed: {error}");
+                if matches!(error, AgentError::NodeNotFound) {
+                    return Err(error);
+                }
                 last_error = error;
             }
         }
@@ -288,16 +325,12 @@ async fn run_once(script: &str, payload: &[u8], gemini_key: Option<&str>) -> Res
             Ok(result) => result?,
             Err(_) => return Err(AgentError::Timeout),
         };
-        if let Ok(stderr) = String::from_utf8(output.stderr) {
-            if !stderr.trim().is_empty() {
-                tracing::debug!("{script} stderr: {stderr}");
-            }
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if !stderr.trim().is_empty() {
+            tracing::debug!("{script} stderr: {stderr}");
         }
         if !output.status.success() {
-            return Err(AgentError::ScriptFailed(format!(
-                "{script} exited with {:?}",
-                output.status.code()
-            )));
+            return Err(AgentError::ScriptFailed(classify_failure(&stderr).into()));
         }
         return Ok(output.stdout);
     }
@@ -305,4 +338,19 @@ async fn run_once(script: &str, payload: &[u8], gemini_key: Option<&str>) -> Res
         return Err(AgentError::NodeNotFound);
     }
     Err(last_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failures_are_named_by_their_cause() {
+        let network = "TypeError: fetch failed\n  [cause]: Error: Client network socket disconnected before secure TLS connection was established {\n    code: 'ECONNRESET'";
+        assert_eq!(classify_failure(network), "no internet connection");
+        assert_eq!(classify_failure("ApiError: {\"error\":{\"code\":400,\"message\":\"API key not valid\"}}"), "Gemini rejected the API key");
+        assert_eq!(classify_failure("got status: 429 RESOURCE_EXHAUSTED"), "Gemini quota or rate limit reached");
+        assert_eq!(classify_failure("got status: 503 UNAVAILABLE. The model is overloaded"), "Gemini is busy or down");
+        assert_eq!(classify_failure("SyntaxError: Unexpected token"), "the AI script failed — see the log");
+    }
 }

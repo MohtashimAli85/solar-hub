@@ -344,10 +344,11 @@ impl Engine<'_> {
     }
 
     async fn ai_failure(&self, already_notified: &mut bool, error: AgentError, holding: &str) {
+        let why = error.user_reason();
         tracing::warn!("automation agent call failed: {error}");
         if !*already_notified {
             *already_notified = true;
-            self.notify_info(&format!("AI unavailable — keeping {holding}")).await;
+            self.notify_info(&format!("AI unavailable ({why}) — keeping {holding}, retrying at the next check")).await;
         }
     }
 }
@@ -1476,10 +1477,11 @@ async fn apply_on_battery_plan(
 
 async fn on_battery_ai_failure(engine: &Engine<'_>, memory: &mut EngineMemory, error: AgentError, now: NaiveDateTime) -> Duration {
     let config = engine.config;
+    let why = error.user_reason();
     tracing::warn!("automation agent call failed while on battery: {error}");
     memory.night.ai_failures += 1;
     if memory.night.ai_failures >= MAX_AI_FAILURES {
-        if revert_to_solar(engine, &mut memory.night, "switch to Solar — AI unavailable, not running the battery unattended").await {
+        if revert_to_solar(engine, &mut memory.night, &format!("switch to Solar — AI unavailable ({why}), not running the battery unattended")).await {
             memory.night.phase = NightPhase::Deciding;
             memory.night.ai_failures = 0;
             memory.night.next_check_at = Some(now + chrono::Duration::minutes(AI_RETRY_MINUTES));
@@ -1491,7 +1493,7 @@ async fn on_battery_ai_failure(engine: &Engine<'_>, memory: &mut EngineMemory, e
     if !memory.night.ai_failure_notified {
         memory.night.ai_failure_notified = true;
         engine
-            .notify_info(&format!("AI unavailable — staying on battery until {} and retrying", fmt_pct(reserve)))
+            .notify_info(&format!("AI unavailable ({why}) — staying on battery until {} and retrying", fmt_pct(reserve)))
             .await;
     }
     if memory.night.phase == NightPhase::Verifying {
