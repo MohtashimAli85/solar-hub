@@ -33,8 +33,8 @@ export function TodayCard({ insights }: { insights: AutomationInsights }) {
   const verdict = afterSunset
     ? "Sun has set · the night plan takes over"
     : fills
-      ? `Full by ~${clock(day.full_at)} — battery mode (SBG) is fine`
-      : `Won't fill (≈ ${Math.round(day.soc_at_sunset)}% at sunset) — charging on Solar`;
+      ? `On pace to be full by ~${clock(day.full_at)}`
+      : `On pace for ≈ ${Math.round(day.soc_at_sunset)}% by sunset`;
   const now = toMs(insights.updated_at) ?? Date.now();
   const hours = (insights.weather?.hours_until_sunset ?? []).map((hour) => ({
     t: (toMs(hour.at) ?? 0) - 3_600_000,

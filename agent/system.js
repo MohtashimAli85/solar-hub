@@ -32,6 +32,12 @@ On a normal night — the coming day looks sunny and there have been few outages
 
 The night plan can start as early as sunset; the usual start is 21:00. When the battery is high in the evening (around 80–90% or more) and it can carry the evening and the night down to the reserve, start on the battery early instead of leaving it full until 21:00 — every hour on battery is grid units saved. Before bedtime the battery draw is usually 10–20 A; once the family sleeps it drops to around 4 A. With a lower battery, wait for the usual start.
 
+DAYTIME
+
+The homeowner's rule: by day stay on SBG unless there is really no sun. In SBG, when a big load comes on (oven, EV, AC compressor), the inverter first takes it from the battery and then slowly ramps up the panels over a few minutes. In Solar mode the same load goes straight to the grid. So a short battery drain, a brief dip in PV, or a passing cloud is normal and must NOT make you leave SBG. A full battery also makes SBG throttle the panels to the load, so low PV with a full battery is not "no sun".
+
+Leave SBG for Solar mode only when the sun is truly gone for a sustained stretch and the forecast doesn't bring it back soon, or when it is a grey day and the battery would not hold what tonight needs (the prompt gives that number) — then Solar mode protects tonight. Don't flip back and forth: the controller refuses a reversal within 30 minutes of a switch and allows only a few switches a day, so a switch should be one you expect to keep for hours. When unsure and the battery is comfortable, stay on SBG.
+
 GOALS, IN ORDER
 
 1. Never go below the hard floor.

@@ -106,7 +106,7 @@ const PROVIDERS = {
 export async function generateStructured(request) {
   const available = MODELS.filter(({ provider }) => process.env[PROVIDERS[provider].keyName]);
   if (available.length === 0) {
-    throw new Error("GEMINI_API_KEY is not set");
+    throw new Error("GROQ_API_KEY and GEMINI_API_KEY are not set");
   }
 
   const deadline = Date.now() + TOTAL_BUDGET_MS;

@@ -49,7 +49,7 @@ fn classify_failure(stderr: &str) -> &'static str {
         "Gemini is busy or down"
     } else if has(&["econnreset", "enotfound", "etimedout", "eai_again", "econnrefused", "fetch failed", "network", "socket"]) {
         "no internet connection"
-    } else if has(&["api_key_invalid", "api key not valid", "permission_denied", "401", "403", "gemini_api_key is not set"]) {
+    } else if has(&["api_key_invalid", "api key not valid", "permission_denied", "401", "403", "api_key is not set", "api_key are not set"]) {
         "Gemini rejected the API key"
     } else if has(&["429", "resource_exhausted", "quota", "rate limit"]) {
         "Gemini quota or rate limit reached"
@@ -227,26 +227,53 @@ pub struct HourOutlookRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DayInput {
-    pub now: String,
-    pub soc: f64,
-    pub rated_capacity_ah: f64,
-    pub ah_to_full: f64,
-    pub charge_a: f64,
-    pub max_charge_a: Option<f64>,
+pub struct DayHistoryRow {
+    pub time: String,
     pub pv_w: Option<f64>,
     pub load_w: Option<f64>,
-    pub typical_load_now_w: Option<f64>,
-    pub current_mode: String,
-    pub battery_draining: bool,
+    pub battery_a: Option<f64>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DaySwitchRow {
+    pub time: String,
+    pub mode: String,
+    pub reason: String,
+}
+
+/// Everything is pre-computed here so the model reasons instead of doing
+/// arithmetic.
+#[derive(Debug, Clone, Serialize)]
+pub struct DayInput {
+    pub now: String,
     pub sunset: String,
     pub hours_of_sun_left: f64,
-    pub projected_soc_at_sunset: f64,
-    pub projected_full_at: Option<String>,
-    pub projection_method: String,
-    pub next_hours: Vec<HourOutlookRow>,
-    pub recent_days: Vec<RecentDayRow>,
+    pub current_mode: String,
+    pub soc: f64,
+    pub rated_capacity_ah: f64,
+    pub battery_v: Option<f64>,
+    pub pv_w: Option<f64>,
+    pub load_w: Option<f64>,
+    pub battery_a: Option<f64>,
+    pub smart_load_on: Option<bool>,
+    pub sky: String,
+    pub dim_minutes: i64,
+    pub typical_load_now_w: Option<f64>,
+    pub load_is_unusual: bool,
+    pub last_90_min: Vec<DayHistoryRow>,
     pub forecast_available: bool,
+    pub forecast: Vec<HourOutlookRow>,
+    pub recent_days: Vec<RecentDayRow>,
+    pub projected_soc_at_sunset: Option<f64>,
+    pub projected_full_at: Option<String>,
+    pub usual_night_start: String,
+    pub tonight_needs_soc: Option<f64>,
+    pub projected_sunrise_soc: Option<f64>,
+    pub floor_soc: f64,
+    pub today_switches: Vec<DaySwitchRow>,
+    pub switches_today: u32,
+    pub minutes_since_last_switch: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -291,23 +318,33 @@ impl AgentRunner for NodeAgent {
     }
 
     fn run_day(&self, input: DayInput) -> BoxFuture<'_, Result<DayDecision, AgentError>> {
-        Box::pin(async move {
-            run_script("day.js", &input, &model_keys()?).await
-        })
+        Box::pin(async move { run_script("day.js", &input, &model_keys()?).await })
     }
 }
 
-/// The API keys handed to the agent script as environment variables. Gemini
-/// is required; Groq is an optional fallback.
+/// The API keys the agent script needs, as (environment variable, Settings
+/// label, keychain reader). Groq is tried first, Gemini as the backup.
+const MODEL_KEYS: [(&str, &str, fn() -> Result<Option<String>, String>); 2] = [
+    ("GROQ_API_KEY", "Groq", crate::storage::get_groq_api_key),
+    ("GEMINI_API_KEY", "Gemini", crate::storage::get_gemini_api_key),
+];
+
+/// Why automation can't run yet, if a required key is missing.
+pub fn missing_key_reason() -> Option<String> {
+    MODEL_KEYS
+        .iter()
+        .find(|(_, _, read)| read().ok().flatten().is_none())
+        .map(|(_, label, _)| format!("Set a {label} API key in Settings"))
+}
+
 fn model_keys() -> Result<Vec<(&'static str, String)>, AgentError> {
-    let gemini = crate::storage::get_gemini_api_key()
-        .map_err(AgentError::ScriptFailed)?
-        .ok_or_else(|| AgentError::ScriptFailed("GEMINI_API_KEY is not set".into()))?;
-    let mut keys = vec![("GEMINI_API_KEY", gemini)];
-    if let Ok(Some(groq)) = crate::storage::get_groq_api_key() {
-        keys.push(("GROQ_API_KEY", groq));
-    }
-    Ok(keys)
+    MODEL_KEYS
+        .iter()
+        .map(|(name, _, read)| {
+            let key = read().map_err(AgentError::ScriptFailed)?;
+            key.map(|key| (*name, key)).ok_or_else(|| AgentError::ScriptFailed(format!("{name} is not set")))
+        })
+        .collect()
 }
 
 fn agent_dir() -> PathBuf {

@@ -14,57 +14,98 @@ export const DAY_SCHEMA = {
 const n = (value, unit = "", digits = 0) =>
   value === null || value === undefined ? "unknown" : `${Number(value).toFixed(digits)}${unit}`;
 
-const METHODS = {
-  pv_array: "expected PV from the array size minus the typical house load, capped at the inverter's max charge current",
-  pv_headroom: "the PV this hour scaled by the forecast sun, minus the typical house load, capped at the inverter's max charge current — i.e. what the battery could take once any unusual load stops",
-  charge_scaling: "today's measured charge current scaled by the forecast sun for each hour",
-  constant_charge: "today's charge current held constant (no forecast available)",
-};
-
-function loadNote(input) {
-  if (input.load_w == null || input.typical_load_now_w == null) return "";
-  if (input.load_w > input.typical_load_now_w * 1.5 + 300) {
-    return ` That is well above the usual ${n(input.typical_load_now_w, " W")} for this hour — probably a temporary big load (for example an EV charging) soaking up the sun right now.`;
-  }
-  return ` (Usual for this hour: ${n(input.typical_load_now_w, " W")}.)`;
+function historyTable(rows) {
+  if (!rows || rows.length === 0) return "  (no samples recorded yet)";
+  const header = "  time   PV W  load W  battery A  mode";
+  const body = rows
+    .map((r) => `  ${r.time}  ${String(n(r.pv_w)).padStart(5)}  ${String(n(r.load_w)).padStart(6)}  ${String(n(r.battery_a, "", 1)).padStart(9)}  ${r.mode ?? "?"}`)
+    .join("\n");
+  return `${header}\n${body}`;
 }
 
-export function buildPrompt(input) {
-  const hours = input.next_hours?.length
-    ? input.next_hours
-        .map((h) => `  ${h.time} ${n(h.radiation_w_m2, " W/m²")} radiation, ${n(h.cloud_pct, "%")} cloud`)
-        .join("\n")
-    : "  (no forecast)";
-  const recent = input.recent_days?.length
-    ? input.recent_days
+function forecastSection(input) {
+  if (!input.forecast_available) return "Forecast unavailable right now.";
+  if (!input.forecast.length) return "No forecast hours left before sunset.";
+  return input.forecast
+    .map((h) => `  ${h.time} ${n(h.radiation_w_m2, " W/m²")} radiation, ${n(h.cloud_pct, "%")} cloud`)
+    .join("\n");
+}
+
+function recentDays(days) {
+  return days && days.length
+    ? days
         .map(
           (d) =>
-            `- ${d.date}: ${n(d.radiation_kwh_m2, " kWh/m²", 1)} → ${d.full_at ? `full by ${d.full_at}` : d.max_soc != null ? `peaked at ${n(d.max_soc, "%")}` : "not recorded"}`,
+            `- ${d.date}: ${n(d.radiation_kwh_m2, " kWh/m²", 1)} → ${d.full_at ? `battery full by ${d.full_at}` : d.max_soc != null ? `battery peaked at ${n(d.max_soc, "%")}` : "not recorded"}`,
         )
         .join("\n")
     : "- (no recent days recorded yet)";
+}
 
-  return `Day decision. It is ${input.now}. By day "sbg" is right only while the sun is actually charging the battery and will fill it by sunset; "solar" lets the grid cover any shortfall so the battery is kept and all spare solar goes into it.
+function batteryOutlook(input) {
+  const sunset =
+    input.projected_soc_at_sunset == null
+      ? "Projection to sunset unavailable."
+      : input.projected_full_at
+        ? `On pace to be full by ${input.projected_full_at} (about ${n(input.projected_soc_at_sunset, "%")} at sunset).`
+        : `About ${n(input.projected_soc_at_sunset, "%")} by sunset.`;
+  const night =
+    input.tonight_needs_soc == null
+      ? ""
+      : ` A normal night from ${input.usual_night_start} to sunrise uses about ${n(input.tonight_needs_soc, "% SOC")}${
+          input.projected_sunrise_soc == null
+            ? ""
+            : `, which would leave about ${n(input.projected_sunrise_soc, "%")} at sunrise (the floor is ${input.floor_soc}%)`
+        }.`;
+  return sunset + night;
+}
 
-The homeowner's rule of thumb: even a modest charge current (around 10 A) fills the battery before sunset when there is real sun. Only switch to "solar" when it clearly won't fill.
+function switchesSection(input) {
+  const rows = input.today_switches?.length
+    ? input.today_switches.map((s) => `- ${s.time} → ${s.mode}: ${s.reason}`).join("\n")
+    : "- none yet today";
+  const last =
+    input.minutes_since_last_switch == null ? "" : ` The last switch was ${input.minutes_since_last_switch} minutes ago.`;
+  return `${rows}\n${input.switches_today} of the 4 allowed switches used today.${last}`;
+}
 
-Battery now: ${n(input.soc, "%")} of ${n(input.rated_capacity_ah, " Ah")} (${n(input.ah_to_full, " Ah")} to full), charging at ${n(input.charge_a, " A", 1)}${input.max_charge_a != null ? ` — the inverter can charge it at up to ${n(input.max_charge_a, " A")} when there is enough sun` : ""}. PV ${n(input.pv_w, " W")}, load ${n(input.load_w, " W")}.${loadNote(input)} Current mode: ${input.current_mode}.
+function loadNote(input) {
+  if (input.load_w == null || input.typical_load_now_w == null) return "";
+  return input.load_is_unusual
+    ? ` That is well above the usual ${n(input.typical_load_now_w, " W")} for this hour — probably a temporary big load such as an EV or the oven.`
+    : ` (Usual for this hour: ${n(input.typical_load_now_w, " W")}.)`;
+}
 
-${input.battery_draining ? "RIGHT NOW THE BATTERY IS BEING DRAINED on sbg — the sun isn't covering the house. That is a strong reason for \"solar\", even when the battery is nearly full: a full battery is only useful if it is still full tonight.\n\n" : ""}A low charge current right now is not a problem by itself: if a big load is only temporary, the battery catches up quickly afterwards at the higher rate. Judge by whether the battery can still be full by sunset.
+export function buildPrompt(input) {
+  return `Daytime decision. It is ${input.now}; sunset ${input.sunset}, ${n(input.hours_of_sun_left, " h", 1)} of sun left. The inverter is on ${input.current_mode} mode. Choose "sbg" to stay on the battery-first mode or "solar" for Solar mode (solar, then grid, then battery).
 
-Sunset ${input.sunset}, ${n(input.hours_of_sun_left, " h", 1)} of sun left.
-Projected SOC at sunset: ${n(input.projected_soc_at_sunset, "%")}${input.projected_full_at ? ` (full around ${input.projected_full_at})` : ""} — computed from ${METHODS[input.projection_method] ?? input.projection_method}. Use it rather than your own arithmetic.
+The controller's fixed rules did not settle this one: the sky has been ${input.sky} for ${input.dim_minutes} minutes and the forecast is not clear-cut. "grey" means some sun but the battery is draining; "dark" means almost no sun and the battery is draining.
 
-Forecast for the rest of the day${input.forecast_available ? "" : " (unavailable)"}:
-${hours}
+Now:
+- Battery ${n(input.soc, "%")} of ${n(input.rated_capacity_ah, " Ah")}, ${n(input.battery_v, " V", 1)}, current ${n(input.battery_a, " A", 1)} (positive charging, negative draining).
+- PV ${n(input.pv_w, " W")}, house load ${n(input.load_w, " W")}.${loadNote(input)}
+- Smart load: ${input.smart_load_on == null ? "unknown" : input.smart_load_on ? "ON (heavy loads cut)" : "OFF"}.
 
-How recent days actually went:
-${recent}
+Last 90 minutes, oldest first (a short drain that recovers is a panel ramp-up, not a dark sky):
+${historyTable(input.last_90_min)}
 
-Judge the borderline cases: a passing cloud that clears soon, a projection just under 100% on an otherwise sunny afternoon, or a cloudy morning that the forecast says will clear. Decide:
-- mode: "sbg" or "solar".
-- recheck_minutes: when to look again (15–120).
-- reason: one short, plain sentence for the homeowner.`;
+Forecast until sunset:
+${forecastSection(input)}
+
+How recent days went (radiation → how the battery charged):
+${recentDays(input.recent_days)}
+
+Battery outlook (use these numbers, don't redo the arithmetic):
+${batteryOutlook(input)}
+
+Today's switches:
+${switchesSection(input)}
+
+Decide:
+- mode: "sbg" unless the sun is really gone for long enough, or the battery won't hold what tonight needs and the day won't refill it. A ramp-up drain, a cloud that the forecast says clears, or a comfortable battery means "sbg".
+- recheck_minutes: when to look again (15–60). Sooner when the sky is changing, later when it is settled.
+- confidence: 0 to 1.
+- reason: one or two plain sentences naming the actual factors, e.g. "Dark for 40 minutes and no sun forecast until 15:00". Say "Solar mode", never "grid mode".`;
 }
 
 if (isMainModule(import.meta.url)) {

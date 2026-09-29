@@ -162,16 +162,16 @@ export function SettingsPage() {
               <Label>Gemini API key</Label>
               <Input
                 type="password"
-                placeholder={form.has_gemini_api_key ? "Saved — leave blank to keep" : "For the automation agent"}
+                placeholder={form.has_gemini_api_key ? "Saved — leave blank to keep" : "Backup when Groq is busy"}
                 value={form.gemini_api_key}
                 onChange={(event) => set({ gemini_api_key: event.target.value })}
               />
             </div>
             <div className="space-y-1.5">
-              <Label>Groq API key (optional)</Label>
+              <Label>Groq API key</Label>
               <Input
                 type="password"
-                placeholder={form.has_groq_api_key ? "Saved — leave blank to keep" : "Backup when Gemini is busy"}
+                placeholder={form.has_groq_api_key ? "Saved — leave blank to keep" : "For the automation agent (tried first)"}
                 value={form.groq_api_key}
                 onChange={(event) => set({ groq_api_key: event.target.value })}
               />

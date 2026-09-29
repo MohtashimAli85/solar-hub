@@ -136,7 +136,7 @@ export function AutomationSettingsForm({ config, saving, testing, onSave, onTest
             <NumberField
               id="sunrise-buffer"
               label="Sunrise buffer (hours)"
-              help="Extra time after sunrise before the panels can carry the house. The night plan stays on battery until then; the day check starts after it."
+              help="Extra time after sunrise before the panels can carry the house. The night plan stays on battery until then; the day rule (SBG unless there's no sun) starts after it."
               value={form.sunrise_buffer_hours}
               step={0.5}
               error={errors.sunrise_buffer_hours}

@@ -4,8 +4,9 @@ use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use tauri::AppHandle;
 
 use crate::automation::agent::{
-    self, AgentError, AgentRunner, DayInput, HourLoadRow, HourOutlookRow, NextDayRow, NightInput, NightOutcomeRow, OutageRow,
-    PreviousPlan, RecentDayRow, SmartLoadBrief, SocRow, SunInfo, SunInput, WeatherBrief,
+    self, AgentError, AgentRunner, DayHistoryRow, DayInput, DaySwitchRow, HourLoadRow, HourOutlookRow, NextDayRow,
+    NightInput, NightOutcomeRow, OutageRow, PreviousPlan, RecentDayRow, SmartLoadBrief, SocRow, SunInfo, SunInput,
+    WeatherBrief,
 };
 use crate::automation::config::AutomationConfig;
 use crate::automation::guardrails;
@@ -48,10 +49,32 @@ const SUMMER_MONTHS: std::ops::RangeInclusive<u32> = 4..=8;
 const SMART_LOAD_LATEST_HOUR: u32 = 23;
 const HEAVY_LOAD_FALLBACK_W: f64 = 1000.0;
 const DAY_DRAIN_A: f64 = 1.0;
-const DRAIN_CHECKS_TO_SWITCH: u32 = 2;
+/// By day SBG stays unless the sun is gone (see `day_switch_after`). In SBG a
+/// new load is first taken from the battery while the panels ramp up, so
+/// short drains are normal. PV under NO_SUN_PV_W is dark, under SUN_PV_W grey.
+const NO_SUN_PV_W: f64 = 150.0;
+const SUN_PV_W: f64 = 300.0;
+/// Back on SBG once PV holds SUN_PV_W for SUN_BACK_MINUTES.
+const SUN_BACK_MINUTES: i64 = 15;
+/// The forecast looks this many hours ahead (this hour included); its peak
+/// radiation says whether the sun is coming.
+const OUTLOOK_HOURS: i64 = 3;
+const DARK_W_M2: f64 = 150.0;
+const SUNNY_W_M2: f64 = 350.0;
+/// The AI is only asked once the sky has been dim this long, and its hard
+/// limits: no reversing within MIN_DAY_DWELL_MINUTES of a switch, at most
+/// MAX_DAY_SWITCHES a day.
+const DIM_ASK_MINUTES: i64 = 15;
+const MIN_DAY_DWELL_MINUTES: i64 = 30;
+const MAX_DAY_SWITCHES: u32 = 4;
+const DAY_RECHECK_RANGE: (f64, f64) = (15.0, 60.0);
+/// While the sky is dim on SBG the day tick is this short, so the last 90
+/// minutes of samples handed to the AI are dense.
+const DIM_TICK: Duration = Duration::from_secs(300);
+const DAY_HISTORY_MINUTES: i64 = 90;
+const DAY_HISTORY_STEP_MINUTES: i64 = 5;
 const SUN_GONE_PV_W: f64 = 50.0;
 const SUN_GONE_BEFORE_SUNSET_MINUTES: i64 = 60;
-const AFTER_DRAIN_RECHECK_MINUTES: i64 = 60;
 const BOOST_MINUTES: i64 = 3;
 const BOOST_GAP_MINUTES: i64 = 5;
 const MAX_BOOSTS_PER_NIGHT: u32 = 4;
@@ -494,10 +517,32 @@ struct DayMemory {
     next_check_at: Option<NaiveDateTime>,
     last_write_at: Option<Instant>,
     last_written_mode: Option<u32>,
-    ai_failure_notified: bool,
     smart_load_applied: Option<bool>,
-    forced: bool,
-    drain_checks: u32,
+    /// What the sky looks like and since when, for the sustained-sun rule.
+    sky: Option<(Sky, NaiveDateTime)>,
+    last_switch_at: Option<NaiveDateTime>,
+    switches_today: u32,
+    /// When the AI may be asked again: its own recheck time, or a retry after
+    /// a failure.
+    ai_next_at: Option<NaiveDateTime>,
+    ai_failure_notified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sky {
+    Sun,
+    /// Some sun, but the battery is draining.
+    Grey,
+    /// No real sun and the battery is draining.
+    Dark,
+}
+
+/// The forecast's peak radiation over the next few hours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outlook {
+    Dark,
+    Mixed,
+    Sunny,
 }
 
 struct SunCache {
@@ -755,8 +800,8 @@ async fn tick(
 
     let sleep_for = if !config.enabled {
         idle(&engine, memory).await
-    } else if crate::storage::get_gemini_api_key().ok().flatten().is_none() {
-        enter_blocked(state, services.notifier, memory, "Set a Gemini API key in Settings").await
+    } else if let Some(reason) = agent::missing_key_reason() {
+        enter_blocked(state, services.notifier, memory, &reason).await
     } else {
         memory.blocked_notified = None;
         let window = ctx.clock.window();
@@ -769,8 +814,6 @@ async fn tick(
         }
         if state.force_check.swap(false, std::sync::atomic::Ordering::SeqCst) {
             memory.night.next_check_at = None;
-            memory.day.next_check_at = None;
-            memory.day.forced = true;
         }
         let sleep_for = match window {
             Window::Night => night_tick(&engine, memory, &reading, &ctx).await,
@@ -1754,55 +1797,14 @@ fn typical_day_load(ctx: &Context, hour: u32) -> Option<f64> {
     ctx.day_profile.iter().find(|h| h.hour == hour).map(|h| h.load_w)
 }
 
-fn build_day_input(
-    ctx: &Context,
+async fn switch_day_mode(
+    engine: &Engine<'_>,
+    day: &mut DayMemory,
     reading: &EngineReading,
-    projection: &DayProjection,
-    effective: Option<u32>,
-    draining: bool,
-) -> DayInput {
-    let next_hours = ctx
-        .weather
-        .as_ref()
-        .map(|summary| {
-            summary
-                .hours_until_sunset
-                .iter()
-                .map(|hour| HourOutlookRow {
-                    time: hhmm(hour.at - chrono::Duration::hours(1)),
-                    cloud_pct: hour.cloud_pct,
-                    radiation_w_m2: hour.radiation_w_m2,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    DayInput {
-        now: ctx.clock.now.format("%a %d %b %Y, %H:%M").to_string(),
-        soc: projection.soc_now.round(),
-        rated_capacity_ah: reading.rated_capacity_ah,
-        ah_to_full: projection.ah_to_full.round(),
-        charge_a: (projection.charge_a * 10.0).round() / 10.0,
-        max_charge_a: reading.max_charge_a,
-        pv_w: reading.pv_w.map(f64::round),
-        load_w: reading.load_w.map(f64::round),
-        typical_load_now_w: typical_day_load(ctx, ctx.clock.now.hour()).map(f64::round),
-        current_mode: mode_label(effective).unwrap_or_else(|| "Unknown".into()),
-        battery_draining: draining,
-        sunset: hhmm(ctx.clock.sunset_today),
-        hours_of_sun_left: (projection.hours_of_sun_left * 10.0).round() / 10.0,
-        projected_soc_at_sunset: projection.soc_at_sunset.round(),
-        projected_full_at: projection.full_at.map(hhmm),
-        projection_method: serde_json::to_value(projection.method)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_default(),
-        next_hours,
-        recent_days: ctx.weather.as_ref().map(recent_day_rows).unwrap_or_default(),
-        forecast_available: ctx.forecast.is_some(),
-    }
-}
-
-async fn switch_day_mode(engine: &Engine<'_>, day: &mut DayMemory, reading: &EngineReading, target: u32, body: &str) -> bool {
+    now: NaiveDateTime,
+    target: u32,
+    body: &str,
+) -> bool {
     if !guardrails::can_write(reading.grid_on(), false, day.last_write_at, Instant::now()) {
         return false;
     }
@@ -1814,11 +1816,22 @@ async fn switch_day_mode(engine: &Engine<'_>, day: &mut DayMemory, reading: &Eng
         day.last_written_mode = Some(target);
     }
     day.effective_mode = Some(target);
+    day.last_switch_at = Some(now);
+    day.switches_today += 1;
     engine.notify_action(body).await;
     true
 }
 
 async fn day_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &EngineReading, ctx: &Context) -> Duration {
+    let sleep_for = day_decide(engine, memory, reading, ctx).await;
+    let day = &memory.day;
+    let dim_on_sbg = !day.paused
+        && day.effective_mode == Some(SBG_MODE)
+        && day.sky.is_some_and(|(sky, _)| sky != Sky::Sun);
+    if dim_on_sbg { sleep_for.min(DIM_TICK) } else { sleep_for }
+}
+
+async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &EngineReading, ctx: &Context) -> Duration {
     let config = engine.config;
     let now = ctx.clock.now;
     let day = &mut memory.day;
@@ -1842,7 +1855,7 @@ async fn day_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &Engi
         let sun = if now >= ctx.clock.sunset_today { "The sun has set" } else { "The sun is done for the day" };
         let reason = format!("{sun} — Solar mode, keeping the battery for tonight; the night plan starts at {evening}.");
         let notice = format!("switch to Solar — {}, keeping the battery for tonight", sun.to_lowercase());
-        if day.effective_mode == Some(SBG_MODE) && switch_day_mode(engine, day, reading, SOLAR_MODE, &notice).await
+        if day.effective_mode == Some(SBG_MODE) && switch_day_mode(engine, day, reading, now, SOLAR_MODE, &notice).await
         {
             engine.record(now, Window::Day, "solar", None, None, None, true, &reason);
         }
@@ -1850,62 +1863,333 @@ async fn day_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &Engi
         return normal_interval(config);
     }
 
-    if reading.battery_a.is_none() {
-        engine
-            .set_reason("Connect the battery (BMS) — the day check needs its charge current.")
-            .await;
-        return normal_interval(config);
-    }
-    let Some(projection) = day_projection(ctx, reading, config) else {
+    let Some(seen) = sky_now(day.effective_mode, reading) else {
+        engine.set_reason("Waiting for a solar reading from the inverter.").await;
         return normal_interval(config);
     };
-    let draining = day.effective_mode == Some(SBG_MODE) && draining_on_sbg(reading);
-    day.drain_checks = if draining { day.drain_checks + 1 } else { 0 };
-    if draining && day.drain_checks >= DRAIN_CHECKS_TO_SWITCH {
-        let reason = "The battery is being drained with too little sun — switching to Solar so the grid carries the house and the battery is kept for tonight.";
-        if switch_day_mode(engine, day, reading, SOLAR_MODE, &format!("switch to Solar — {}", reason.to_lowercase())).await {
-            engine.record(now, Window::Day, "solar", None, Some(AFTER_DRAIN_RECHECK_MINUTES as u32), None, true, reason);
-            day.next_check_at = Some(now + chrono::Duration::minutes(AFTER_DRAIN_RECHECK_MINUTES));
-            day.drain_checks = 0;
+    let since = match day.sky {
+        Some((sky, since)) if (sky == Sky::Sun) == (seen == Sky::Sun) => since,
+        _ => now,
+    };
+    day.sky = Some((seen, since));
+    let outlook = sun_outlook(ctx);
+    let (target, wait) = match seen {
+        Sky::Sun => (SBG_MODE, Some(SUN_BACK_MINUTES)),
+        dim => (SOLAR_MODE, day_switch_after(dim, outlook)),
+    };
+    let pv = reading.pv_w.unwrap_or_default().round();
+    let forecast = forecast_note(outlook);
+
+    if day.effective_mode == Some(target) {
+        day.next_check_at = None;
+        if seen == Sky::Sun {
+            day.ai_next_at = None;
         }
-        engine.set_reason(reason).await;
+        let reason = match seen {
+            Sky::Sun => "SBG — the sun and the battery carry the house. Short battery drains while the panels ramp up are normal.".to_string(),
+            _ => format!("Solar mode — little sun ({pv} W){forecast}, so the grid carries the house and the battery is kept for tonight."),
+        };
+        engine.set_reason(&reason).await;
+        return normal_interval(config);
+    }
+
+    if day.effective_mode == Some(SBG_MODE) && needs_judgement(seen, outlook) {
+        if let Some(sleep_for) = ask_day_agent(engine, day, reading, ctx, seen, since).await {
+            return sleep_for;
+        }
+    }
+
+    let Some(wait) = wait else {
+        day.next_check_at = None;
+        engine
+            .set_reason(&format!("Cloudy ({pv} W) and the battery is draining, but {} — staying on SBG.", sun_coming(outlook)))
+            .await;
+        return normal_interval(config);
+    };
+    let switch_at = since + chrono::Duration::minutes(wait);
+    if now < switch_at {
+        day.next_check_at = Some(switch_at);
+        let reason = match seen {
+            Sky::Sun => format!("The sun is back ({pv} W) — back to SBG at {} if it holds.", hhmm(switch_at)),
+            _ => format!(
+                "Little sun ({pv} W){forecast} and the battery is draining — staying on SBG; Solar mode at {} if it holds.",
+                hhmm(switch_at)
+            ),
+        };
+        engine.set_reason(&reason).await;
         return until(now, day.next_check_at, normal_interval(config));
     }
 
-    let implied = if projection.fills() && !draining { SBG_MODE } else { SOLAR_MODE };
-    let forced = std::mem::take(&mut day.forced);
-    if !forced && day.effective_mode == Some(implied) {
-        return until(now, day.next_check_at, normal_interval(config));
+    let reason = match seen {
+        Sky::Sun => format!("The sun is back ({pv} W) — SBG, so the sun and the battery carry the house."),
+        _ => format!(
+            "Little sun ({pv} W) for {wait} minutes{forecast} — Solar mode so the grid carries the house and the battery is kept for tonight."
+        ),
+    };
+    let notice = format!("switch to {} — {}", output_mode_name(target), reason.to_lowercase());
+    if switch_day_mode(engine, day, reading, now, target, &notice).await {
+        engine.record(now, Window::Day, if target == SBG_MODE { "sbg" } else { "solar" }, None, None, None, true, &reason);
+        day.next_check_at = None;
     }
-    if !forced && day.next_check_at.is_some_and(|next| now < next) {
-        return until(now, day.next_check_at, normal_interval(config));
+    engine.set_reason(&reason).await;
+    normal_interval(config)
+}
+
+/// The unclear middle the rules can't settle: a grey or dark sky where the
+/// forecast is mixed, contradicts the sky, or is missing.
+fn needs_judgement(sky: Sky, outlook: Option<Outlook>) -> bool {
+    match (sky, outlook) {
+        (Sky::Sun, _) => false,
+        (Sky::Dark, Some(Outlook::Dark)) => false,
+        (Sky::Grey, Some(Outlook::Dark | Outlook::Sunny)) => false,
+        _ => true,
+    }
+}
+
+/// Asks the AI whether to leave SBG. `Some` is the tick's answer; `None`
+/// means the AI failed and the fixed rule decides.
+async fn ask_day_agent(
+    engine: &Engine<'_>,
+    day: &mut DayMemory,
+    reading: &EngineReading,
+    ctx: &Context,
+    seen: Sky,
+    since: NaiveDateTime,
+) -> Option<Duration> {
+    let config = engine.config;
+    let now = ctx.clock.now;
+    let pv = reading.pv_w.unwrap_or_default().round();
+    let ask_at = since + chrono::Duration::minutes(DIM_ASK_MINUTES);
+    if now < ask_at {
+        day.next_check_at = Some(ask_at);
+        engine
+            .set_reason(&format!(
+                "Little sun ({pv} W) and the battery is draining — staying on SBG; checking again at {} if it holds.",
+                hhmm(ask_at)
+            ))
+            .await;
+        return Some(until(now, day.next_check_at, normal_interval(config)));
+    }
+    if let Some(next) = day.ai_next_at.filter(|next| now < *next) {
+        day.next_check_at = Some(next);
+        return Some(until(now, day.next_check_at, normal_interval(config)));
     }
 
-    let input = build_day_input(ctx, reading, &projection, day.effective_mode, draining);
+    let decisions = engine.state.history.recent_decisions(now.date(), 50);
+    let input = build_day_input(ctx, reading, day, seen, (now - since).num_minutes(), &decisions, config);
     let decision = match engine.agent.run_day(input).await {
         Ok(decision) => decision,
         Err(error) => {
-            engine.ai_failure(&mut day.ai_failure_notified, error, "the current mode").await;
-            return normal_interval(config);
+            engine.ai_failure(&mut day.ai_failure_notified, error, "SBG").await;
+            day.ai_next_at = Some(now + chrono::Duration::minutes(AI_RETRY_MINUTES));
+            return None;
         }
     };
     day.ai_failure_notified = false;
-    let recheck = clamp_recheck(decision.recheck_minutes);
-    day.next_check_at = Some(now + chrono::Duration::minutes(recheck as i64));
-    engine.set_agent_reason(&decision.reason, decision.model.as_deref()).await;
+    let recheck = decision.recheck_minutes.clamp(DAY_RECHECK_RANGE.0, DAY_RECHECK_RANGE.1) as i64;
+    let recheck_at = now + chrono::Duration::minutes(recheck);
+    day.ai_next_at = Some(recheck_at);
+    day.next_check_at = Some(recheck_at);
+    let model = decision.model.as_deref();
 
-    let target = if decision.mode.eq_ignore_ascii_case("sbg") { SBG_MODE } else { SOLAR_MODE };
-    let applied = day.effective_mode != Some(target)
-        && switch_day_mode(
-            engine,
-            day,
-            reading,
-            target,
-            &format!("switch to {} — {}", output_mode_name(target), decision.reason),
-        )
-        .await;
-    engine.record_by(decision.model.as_deref(), now, Window::Day, &decision.mode, None, Some(recheck), Some(decision.confidence), applied, &decision.reason);
-    until(now, day.next_check_at, normal_interval(config))
+    if decision.mode != "solar" {
+        engine.set_agent_reason(&decision.reason, model).await;
+        return Some(until(now, day.next_check_at, normal_interval(config)));
+    }
+
+    let blocked_until = if day.switches_today >= MAX_DAY_SWITCHES {
+        Some((None, format!("already switched {MAX_DAY_SWITCHES} times today")))
+    } else {
+        day.last_switch_at
+            .map(|at| at + chrono::Duration::minutes(MIN_DAY_DWELL_MINUTES))
+            .filter(|until| now < *until)
+            .map(|until| (Some(until), format!("the last switch was less than {MIN_DAY_DWELL_MINUTES} minutes ago")))
+    };
+    if let Some((retry_at, why)) = blocked_until {
+        if let Some(retry_at) = retry_at {
+            day.ai_next_at = Some(retry_at);
+            day.next_check_at = Some(retry_at);
+        }
+        let reason = format!("Staying on SBG — {why}, so it's too soon to switch to Solar mode.");
+        engine.record_by(model, now, Window::Day, "sbg", None, Some(recheck as u32), Some(decision.confidence), false, &reason);
+        engine.set_agent_reason(&reason, model).await;
+        return Some(until(now, day.next_check_at, normal_interval(config)));
+    }
+
+    let notice = format!("switch to Solar — {}", decision.reason.to_lowercase());
+    if switch_day_mode(engine, day, reading, now, SOLAR_MODE, &notice).await {
+        engine.record_by(model, now, Window::Day, "solar", None, Some(recheck as u32), Some(decision.confidence), true, &decision.reason);
+        day.next_check_at = None;
+    }
+    engine.set_agent_reason(&decision.reason, model).await;
+    Some(normal_interval(config))
+}
+
+fn build_day_input(
+    ctx: &Context,
+    reading: &EngineReading,
+    day: &DayMemory,
+    sky: Sky,
+    dim_minutes: i64,
+    decisions: &[DecisionRow],
+    config: &AutomationConfig,
+) -> DayInput {
+    let now = ctx.clock.now;
+    let soc = reading.soc.unwrap_or_default();
+    let projection = day_projection(ctx, reading, config);
+    let typical_now = typical_day_load(ctx, now.hour());
+
+    let mut history: Vec<DayHistoryRow> = Vec::new();
+    let mut last_bucket = None;
+    let from = now - chrono::Duration::minutes(DAY_HISTORY_MINUTES);
+    for sample in ctx.samples.iter().filter(|sample| sample.at >= from && sample.at <= now) {
+        let bucket = (sample.at - from).num_minutes() / DAY_HISTORY_STEP_MINUTES;
+        let row = DayHistoryRow {
+            time: hhmm(sample.at),
+            pv_w: sample.pv_w.map(f64::round),
+            load_w: sample.load_w.map(f64::round),
+            battery_a: sample.battery_a.map(|amps| (amps * 10.0).round() / 10.0),
+            mode: sample.mode.clone(),
+        };
+        if last_bucket == Some(bucket) {
+            history.pop();
+        }
+        history.push(row);
+        last_bucket = Some(bucket);
+    }
+
+    let forecast = ctx
+        .forecast
+        .as_ref()
+        .map(|forecast| {
+            forecast
+                .hours_between(now, ctx.clock.sunset_today)
+                .into_iter()
+                .map(|hour| HourOutlookRow {
+                    time: hhmm(hour.at),
+                    cloud_pct: hour.cloud_pct.map(f64::round),
+                    radiation_w_m2: hour.radiation_w_m2.map(f64::round),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let tonight_start = ctx.clock.night_start_on(now.date());
+    let tonight_needs_soc = night_trajectory(ctx, reading, config, tonight_start, 100.0, None)
+        .0
+        .last()
+        .map(|point| (100.0 - point.soc).max(0.0).round());
+    let soc_at_sunset = projection.as_ref().map(|p| p.soc_at_sunset.min(100.0)).unwrap_or(soc);
+    let projected_sunrise_soc = night_trajectory(ctx, reading, config, tonight_start, soc_at_sunset, None)
+        .0
+        .last()
+        .map(|point| point.soc.round());
+
+    let today_switches = decisions
+        .iter()
+        .filter(|row| row.window == Window::Day.label() && row.applied && row.at.date() == now.date())
+        .rev()
+        .map(|row| DaySwitchRow { time: hhmm(row.at), mode: row.mode.clone(), reason: row.reason.clone() })
+        .collect();
+
+    DayInput {
+        now: now.format("%a %d %b %Y, %H:%M").to_string(),
+        sunset: hhmm(ctx.clock.sunset_today),
+        hours_of_sun_left: (((ctx.clock.sunset_today - now).num_minutes().max(0) as f64) / 60.0 * 10.0).round() / 10.0,
+        current_mode: output_mode_name(day.effective_mode.unwrap_or(SBG_MODE)),
+        soc: soc.round(),
+        rated_capacity_ah: reading.rated_capacity_ah,
+        battery_v: reading.batt_v,
+        pv_w: reading.pv_w.map(f64::round),
+        load_w: reading.load_w.map(f64::round),
+        battery_a: reading.battery_a.map(|amps| (amps * 10.0).round() / 10.0),
+        smart_load_on: reading.smart_load,
+        sky: match sky {
+            Sky::Sun => "sun",
+            Sky::Grey => "grey",
+            Sky::Dark => "dark",
+        }
+        .into(),
+        dim_minutes,
+        typical_load_now_w: typical_now.map(f64::round),
+        load_is_unusual: matches!((reading.load_w, typical_now), (Some(load), Some(typical)) if load > typical * 1.5 + 300.0),
+        last_90_min: history,
+        forecast_available: ctx.forecast.is_some(),
+        forecast,
+        recent_days: ctx.weather.as_ref().map(recent_day_rows).unwrap_or_default(),
+        projected_soc_at_sunset: projection.as_ref().map(|p| p.soc_at_sunset.min(100.0).round()),
+        projected_full_at: projection.as_ref().and_then(|p| p.full_at).map(hhmm),
+        usual_night_start: hhmm(tonight_start),
+        tonight_needs_soc,
+        projected_sunrise_soc,
+        floor_soc: config.min_soc_percent,
+        today_switches,
+        switches_today: day.switches_today,
+        minutes_since_last_switch: day.last_switch_at.map(|at| (now - at).num_minutes()),
+    }
+}
+
+/// What the sky looks like from this reading. On SBG it only counts as dim
+/// while the battery is draining: with a full battery the panels are throttled
+/// to the load, so low PV alone means nothing. On Solar (the battery isn't
+/// carrying the house) the sun has to be clearly back.
+fn sky_now(effective: Option<u32>, reading: &EngineReading) -> Option<Sky> {
+    let pv = reading.pv_w?;
+    let sky = if pv >= SUN_PV_W {
+        Sky::Sun
+    } else if effective == Some(SOLAR_MODE) {
+        if pv < NO_SUN_PV_W { Sky::Dark } else { Sky::Grey }
+    } else if !draining_on_sbg(reading) {
+        Sky::Sun
+    } else if pv < NO_SUN_PV_W {
+        Sky::Dark
+    } else {
+        Sky::Grey
+    };
+    Some(sky)
+}
+
+fn sun_outlook(ctx: &Context) -> Option<Outlook> {
+    let forecast = ctx.forecast.as_ref()?;
+    let peak = (0..OUTLOOK_HOURS)
+        .filter_map(|hours| forecast.radiation_during(ctx.clock.now + chrono::Duration::hours(hours)))
+        .reduce(f64::max)?;
+    Some(if peak < DARK_W_M2 {
+        Outlook::Dark
+    } else if peak >= SUNNY_W_M2 {
+        Outlook::Sunny
+    } else {
+        Outlook::Mixed
+    })
+}
+
+/// How long a dim sky has to last before leaving SBG, or `None` to stay: the
+/// forecast decides whether it's a passing cloud or a dark afternoon.
+fn day_switch_after(sky: Sky, outlook: Option<Outlook>) -> Option<i64> {
+    match (sky, outlook) {
+        (Sky::Dark, Some(Outlook::Dark)) => Some(15),
+        (Sky::Dark, Some(Outlook::Sunny)) => Some(90),
+        (Sky::Dark, _) => Some(45),
+        (Sky::Grey, Some(Outlook::Dark)) => Some(45),
+        _ => None,
+    }
+}
+
+fn forecast_note(outlook: Option<Outlook>) -> &'static str {
+    match outlook {
+        Some(Outlook::Dark) => " and the forecast stays dark",
+        Some(Outlook::Sunny) => ", though the forecast shows sun soon",
+        Some(Outlook::Mixed) => " with patchy sun forecast",
+        None => "",
+    }
+}
+
+fn sun_coming(outlook: Option<Outlook>) -> &'static str {
+    match outlook {
+        Some(Outlook::Sunny) => "the forecast shows sun soon",
+        Some(Outlook::Mixed) => "the forecast shows some sun",
+        _ => "there's still some sun",
+    }
 }
 
 fn build_insights(
@@ -2027,19 +2311,27 @@ mod tests {
 
     struct FakeAgent {
         night: StdMutex<VecDeque<Result<agent::NightPlan, String>>>,
-        day: StdMutex<VecDeque<agent::DayDecision>>,
         night_calls: AtomicUsize,
+        day: StdMutex<VecDeque<Result<agent::DayDecision, String>>>,
         day_calls: AtomicUsize,
+        day_inputs: StdMutex<Vec<DayInput>>,
     }
 
     impl FakeAgent {
-        fn new(night: Vec<Result<agent::NightPlan, String>>, day: Vec<agent::DayDecision>) -> Self {
+        fn new(night: Vec<Result<agent::NightPlan, String>>) -> Self {
             Self {
                 night: StdMutex::new(night.into()),
-                day: StdMutex::new(day.into()),
                 night_calls: AtomicUsize::new(0),
+                day: StdMutex::new(VecDeque::new()),
                 day_calls: AtomicUsize::new(0),
+                day_inputs: StdMutex::new(Vec::new()),
             }
+        }
+
+        fn with_day(day: Vec<Result<agent::DayDecision, String>>) -> Self {
+            let agent = Self::new(Vec::new());
+            *agent.day.lock().unwrap() = day.into();
+            agent
         }
     }
 
@@ -2054,11 +2346,22 @@ mod tests {
             Box::pin(async move { next.map_err(AgentError::ScriptFailed) })
         }
 
-        fn run_day(&self, _input: DayInput) -> BoxFuture<'_, Result<agent::DayDecision, AgentError>> {
+        fn run_day(&self, input: DayInput) -> BoxFuture<'_, Result<agent::DayDecision, AgentError>> {
             self.day_calls.fetch_add(1, Ordering::SeqCst);
+            self.day_inputs.lock().unwrap().push(input);
             let next = self.day.lock().unwrap().pop_front().expect("unexpected day call");
-            Box::pin(async move { Ok(next) })
+            Box::pin(async move { next.map_err(AgentError::ScriptFailed) })
         }
+    }
+
+    fn day_decision(mode: &str, recheck: f64) -> Result<agent::DayDecision, String> {
+        Ok(agent::DayDecision {
+            mode: mode.into(),
+            recheck_minutes: recheck,
+            confidence: 0.8,
+            reason: format!("the AI chose {mode}"),
+            model: Some("llama-test".into()),
+        })
     }
 
     #[derive(Default)]
@@ -2164,7 +2467,7 @@ mod tests {
     #[tokio::test]
     async fn after_dry_run_is_turned_off_the_night_is_planned_again_and_really_switches() {
         let dry = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("sbg", 41.0, 60.0), plan("sbg", 41.0, 60.0)], vec![]);
+        let agent = FakeAgent::new(vec![plan("sbg", 41.0, 60.0), plan("sbg", 41.0, 60.0)]);
         let mut memory = night_memory();
         memory.dry_run = Some(true);
         night_tick(&dry.engine(&agent), &mut memory, &reading(80.0, SOLAR_MODE, 400.0), &ctx(at(26, 21, 0))).await;
@@ -2233,7 +2536,7 @@ mod tests {
     #[tokio::test]
     async fn deciding_goes_on_battery_with_a_reserve_and_verifies() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("sbg", 35.0, 60.0)], vec![]);
+        let agent = FakeAgent::new(vec![plan("sbg", 35.0, 60.0)]);
         let mut memory = night_memory();
         night_tick(&h.engine(&agent), &mut memory, &reading(70.0, SOLAR_MODE, 600.0), &ctx(at(26, 21, 5))).await;
 
@@ -2251,7 +2554,7 @@ mod tests {
     #[tokio::test]
     async fn solar_decision_waits_for_the_agents_recheck_time() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("solar", 40.0, 60.0)], vec![]);
+        let agent = FakeAgent::new(vec![plan("solar", 40.0, 60.0)]);
         let mut memory = night_memory();
         let engine = h.engine(&agent);
         night_tick(&engine, &mut memory, &reading(45.0, SOLAR_MODE, 600.0), &ctx(at(26, 21, 5))).await;
@@ -2273,7 +2576,7 @@ mod tests {
     #[tokio::test]
     async fn verifying_confirms_and_stays_on_battery() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("sbg", 30.0, 90.0)], vec![]);
+        let agent = FakeAgent::new(vec![plan("sbg", 30.0, 90.0)]);
         let mut memory = night_memory();
         memory.night.phase = NightPhase::Verifying;
         memory.night.effective_mode = Some(SBG_MODE);
@@ -2289,7 +2592,7 @@ mod tests {
     #[tokio::test]
     async fn verifying_can_change_its_mind_and_revert() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("solar", 50.0, 30.0)], vec![]);
+        let agent = FakeAgent::new(vec![plan("solar", 50.0, 30.0)]);
         let mut memory = night_memory();
         memory.night.phase = NightPhase::Verifying;
         memory.night.effective_mode = Some(SBG_MODE);
@@ -2304,7 +2607,7 @@ mod tests {
     #[tokio::test]
     async fn reaching_the_reserve_switches_to_solar_for_the_rest_of_the_night() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
         memory.night.phase = NightPhase::OnBattery;
         memory.night.effective_mode = Some(SBG_MODE);
@@ -2323,7 +2626,7 @@ mod tests {
     #[tokio::test]
     async fn dry_run_revert_is_not_undone_by_the_physical_inverter_still_on_sbg() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
         memory.night.effective_mode = Some(SOLAR_MODE);
         memory.night.next_check_at = Some(at(26, 23, 0));
@@ -2336,7 +2639,7 @@ mod tests {
     #[tokio::test]
     async fn simulated_soc_drains_while_dry_run_is_on_battery() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
         memory.night.phase = NightPhase::OnBattery;
         memory.night.effective_mode = Some(SBG_MODE);
@@ -2355,7 +2658,7 @@ mod tests {
     async fn repeated_ai_failures_on_battery_revert_to_solar() {
         let h = Harness::new(true);
         let failures = (0..3).map(|_| Err("down".to_string())).collect();
-        let agent = FakeAgent::new(failures, vec![]);
+        let agent = FakeAgent::new(failures);
         let mut memory = night_memory();
         memory.night.phase = NightPhase::OnBattery;
         memory.night.effective_mode = Some(SBG_MODE);
@@ -2373,7 +2676,7 @@ mod tests {
     #[tokio::test]
     async fn floor_breach_pauses_for_the_rest_of_the_night() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
         night_tick(&h.engine(&agent), &mut memory, &reading(15.0, SOLAR_MODE, 300.0), &ctx(at(26, 22, 0))).await;
         assert_eq!(memory.night.phase, NightPhase::Paused);
@@ -2382,7 +2685,7 @@ mod tests {
     #[tokio::test]
     async fn user_takeover_pauses_for_the_rest_of_the_night() {
         let h = Harness::new(false);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
         memory.night.last_written_mode = Some(SBG_MODE);
         night_tick(&h.engine(&agent), &mut memory, &reading(80.0, SOLAR_MODE, 300.0), &ctx(at(26, 22, 0))).await;
@@ -2392,21 +2695,11 @@ mod tests {
     #[tokio::test]
     async fn engagement_cap_pauses_deciding() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("sbg", 30.0, 60.0)], vec![]);
+        let agent = FakeAgent::new(vec![plan("sbg", 30.0, 60.0)]);
         let mut memory = night_memory();
         memory.night.engagements = guardrails::MAX_ENGAGEMENTS_PER_NIGHT;
         night_tick(&h.engine(&agent), &mut memory, &reading(80.0, SOLAR_MODE, 300.0), &ctx(at(26, 22, 0))).await;
         assert_eq!(memory.night.phase, NightPhase::Paused);
-    }
-
-    fn day_decision(mode: &str) -> agent::DayDecision {
-        agent::DayDecision {
-            mode: mode.into(),
-            recheck_minutes: 30.0,
-            confidence: 0.7,
-            reason: format!("go {mode}"),
-            model: Some("gemini-3.6-flash".into()),
-        }
     }
 
     fn day_memory(effective: u32) -> EngineMemory {
@@ -2420,47 +2713,6 @@ mod tests {
         }
     }
 
-    fn charging(soc: f64, mode: u32, amps: f64) -> EngineReading {
-        EngineReading {
-            charge_a: Some(amps),
-            battery_a: Some(amps),
-            ..reading(soc, mode, 400.0)
-        }
-    }
-
-    #[tokio::test]
-    async fn day_check_skips_the_llm_when_the_battery_will_fill_anyway() {
-        let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
-        let mut memory = day_memory(SBG_MODE);
-        day_tick(&h.engine(&agent), &mut memory, &charging(60.0, SBG_MODE, 10.0), &ctx(at(26, 11, 0))).await;
-        assert_eq!(agent.day_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(memory.day.effective_mode, Some(SBG_MODE));
-    }
-
-    #[tokio::test]
-    async fn day_check_asks_the_agent_when_the_battery_will_not_fill() {
-        let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![day_decision("solar")]);
-        let mut memory = day_memory(SBG_MODE);
-        day_tick(&h.engine(&agent), &mut memory, &charging(40.0, SBG_MODE, 1.0), &ctx(at(26, 11, 0))).await;
-        assert_eq!(agent.day_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE));
-        assert_eq!(memory.day.next_check_at, Some(at(26, 11, 30)));
-    }
-
-    #[tokio::test]
-    async fn check_now_asks_the_agent_even_when_the_projection_agrees() {
-        let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![day_decision("sbg")]);
-        let mut memory = day_memory(SBG_MODE);
-        memory.day.forced = true;
-        memory.day.next_check_at = Some(at(26, 12, 0));
-        day_tick(&h.engine(&agent), &mut memory, &charging(60.0, SBG_MODE, 10.0), &ctx(at(26, 11, 0))).await;
-        assert_eq!(agent.day_calls.load(Ordering::SeqCst), 1);
-        assert!(!memory.day.forced, "the force flag is used once");
-    }
-
     fn dry_run_solar_reading(soc: f64, load_w: f64, pv_w: f64) -> EngineReading {
         EngineReading {
             battery_a: Some(-0.7),
@@ -2472,32 +2724,300 @@ mod tests {
     #[tokio::test]
     async fn near_sunset_with_no_sun_goes_to_grid_without_asking() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = day_memory(SBG_MODE);
         day_tick(&h.engine(&agent), &mut memory, &dry_run_solar_reading(97.0, 101.0, 14.0), &ctx(at(26, 17, 43))).await;
-        assert_eq!(agent.day_calls.load(Ordering::SeqCst), 0, "the agent can't keep SBG while the sun is done");
+        assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE));
+    }
+
+    fn sbg_reading(soc: f64, load_w: f64, pv_w: f64, battery_a: f64) -> EngineReading {
+        EngineReading {
+            battery_a: Some(battery_a),
+            pv_w: Some(pv_w),
+            ..reading(soc, SBG_MODE, load_w)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_short_drain_while_the_panels_ramp_up_keeps_sbg() {
+        let h = Harness::new(false);
+        let agent = FakeAgent::new(vec![]);
+        let mut memory = day_memory(SBG_MODE);
+        let engine = h.engine(&agent);
+        day_tick(&engine, &mut memory, &sbg_reading(100.0, 1500.0, 900.0, -12.0), &ctx(at(26, 12, 29))).await;
+        day_tick(&engine, &mut memory, &sbg_reading(100.0, 1500.0, 1400.0, -2.0), &ctx(at(26, 12, 44))).await;
+        assert_eq!(memory.day.effective_mode, Some(SBG_MODE));
+        assert!(h.decisions().is_empty(), "no switch, no decision");
+    }
+
+    #[tokio::test]
+    async fn a_full_battery_with_throttled_panels_is_not_no_sun() {
+        let h = Harness::new(false);
+        let agent = FakeAgent::new(vec![]);
+        let mut memory = day_memory(SBG_MODE);
+        let engine = h.engine(&agent);
+        for now in [at(26, 12, 0), at(26, 12, 30), at(26, 13, 0)] {
+            day_tick(&engine, &mut memory, &sbg_reading(100.0, 110.0, 120.0, 0.0), &ctx(now)).await;
+        }
+        assert_eq!(memory.day.effective_mode, Some(SBG_MODE));
+    }
+
+    #[tokio::test]
+    async fn cloudy_but_some_sun_keeps_sbg_even_while_draining() {
+        let h = Harness::new(false);
+        let agent = FakeAgent::new(vec![]);
+        let mut memory = day_memory(SBG_MODE);
+        let engine = h.engine(&agent);
+        for hour in [11, 12, 13] {
+            day_tick(&engine, &mut memory, &sbg_reading(70.0, 700.0, 250.0, -18.0), &with_forecast(at(26, hour, 0), 500.0)).await;
+        }
+        assert_eq!(memory.day.effective_mode, Some(SBG_MODE));
+    }
+
+    #[tokio::test]
+    async fn when_the_agent_fails_no_sun_for_45_minutes_goes_to_solar_and_the_sun_brings_sbg_back() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::with_day(vec![Err("down".into()), Err("down".into())]);
+        let mut memory = day_memory(SBG_MODE);
+        let engine = h.engine(&agent);
+        let dark = sbg_reading(70.0, 500.0, 60.0, -18.0);
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 0))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 30))).await;
+        assert_eq!(memory.day.effective_mode, Some(SBG_MODE), "30 minutes isn't long enough");
+        assert_eq!(memory.day.next_check_at, Some(at(26, 11, 45)));
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 45))).await;
+        assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE));
+
+        let bright = EngineReading { pv_w: Some(800.0), ..reading(65.0, SOLAR_MODE, 500.0) };
+        day_tick(&engine, &mut memory, &bright, &ctx(at(26, 12, 30))).await;
+        assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE), "the sun has to hold for 15 minutes");
+        day_tick(&engine, &mut memory, &bright, &ctx(at(26, 12, 45))).await;
+        assert_eq!(memory.day.effective_mode, Some(SBG_MODE));
+        let modes: Vec<String> = h.decisions().into_iter().map(|row| row.mode).collect();
+        assert_eq!(modes, vec!["sbg", "solar"], "newest first");
+    }
+
+    fn with_forecast(now: NaiveDateTime, radiation_w_m2: f64) -> Context {
+        let mut context = ctx(now);
+        let hourly = (0..24)
+            .map(|hour| weather::HourWeather {
+                at: now.date().and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::hours(hour + 1),
+                temp_c: None,
+                cloud_pct: None,
+                radiation_w_m2: Some(radiation_w_m2),
+            })
+            .collect();
+        context.forecast = Some(Forecast { hourly, daily: Vec::new() });
+        context
+    }
+
+    #[test]
+    fn the_forecast_sets_how_long_a_dim_sky_must_last() {
+        assert_eq!(sun_outlook(&with_forecast(at(26, 11, 0), 90.0)), Some(Outlook::Dark));
+        assert_eq!(sun_outlook(&with_forecast(at(26, 11, 0), 600.0)), Some(Outlook::Sunny));
+        assert_eq!(sun_outlook(&ctx(at(26, 11, 0))), None);
+        assert_eq!(day_switch_after(Sky::Dark, Some(Outlook::Dark)), Some(15));
+        assert_eq!(day_switch_after(Sky::Dark, Some(Outlook::Sunny)), Some(90));
+        assert_eq!(day_switch_after(Sky::Dark, None), Some(45));
+        assert_eq!(day_switch_after(Sky::Grey, Some(Outlook::Dark)), Some(45));
+        assert_eq!(day_switch_after(Sky::Grey, Some(Outlook::Mixed)), None);
+    }
+
+    #[tokio::test]
+    async fn a_dark_forecast_switches_after_15_minutes() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let mut memory = day_memory(SBG_MODE);
+        let engine = h.engine(&agent);
+        let dark = sbg_reading(70.0, 500.0, 60.0, -18.0);
+        day_tick(&engine, &mut memory, &dark, &with_forecast(at(26, 11, 0), 80.0)).await;
+        assert_eq!(memory.day.next_check_at, Some(at(26, 11, 15)));
+        day_tick(&engine, &mut memory, &dark, &with_forecast(at(26, 11, 15), 80.0)).await;
         assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE));
     }
 
     #[tokio::test]
-    async fn draining_on_sbg_for_two_checks_switches_to_solar_even_if_the_agent_said_sbg() {
+    async fn a_grey_day_that_stays_grey_goes_to_solar_but_not_when_sun_is_forecast() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![day_decision("sbg")]);
+        let agent = FakeAgent::new(vec![]);
+        let engine = h.engine(&agent);
+        let grey = sbg_reading(70.0, 700.0, 220.0, -18.0);
+        let mut sunny_later = day_memory(SBG_MODE);
+        for now in [at(26, 11, 0), at(26, 11, 45), at(26, 12, 30)] {
+            day_tick(&engine, &mut sunny_later, &grey, &with_forecast(now, 500.0)).await;
+        }
+        assert_eq!(sunny_later.day.effective_mode, Some(SBG_MODE));
+        let mut stays_grey = day_memory(SBG_MODE);
+        day_tick(&engine, &mut stays_grey, &grey, &with_forecast(at(26, 11, 0), 120.0)).await;
+        day_tick(&engine, &mut stays_grey, &grey, &with_forecast(at(26, 11, 45), 120.0)).await;
+        assert_eq!(stays_grey.day.effective_mode, Some(SOLAR_MODE));
+    }
+
+    #[tokio::test]
+    async fn a_moment_of_sun_restarts_the_no_sun_wait() {
+        let h = Harness::new(false);
+        let agent = FakeAgent::with_day(vec![day_decision("sbg", 30.0)]);
         let mut memory = day_memory(SBG_MODE);
         let engine = h.engine(&agent);
-        let cloudy = dry_run_solar_reading(80.0, 900.0, 300.0);
-        day_tick(&engine, &mut memory, &cloudy, &ctx(at(26, 12, 0))).await;
+        let dark = sbg_reading(70.0, 500.0, 60.0, -18.0);
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 0))).await;
+        day_tick(&engine, &mut memory, &sbg_reading(70.0, 500.0, 600.0, 3.0), &ctx(at(26, 11, 30))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 45))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 12, 5))).await;
         assert_eq!(memory.day.effective_mode, Some(SBG_MODE));
-        day_tick(&engine, &mut memory, &cloudy, &ctx(at(26, 12, 15))).await;
+        assert_eq!(memory.day.next_check_at, Some(at(26, 12, 35)));
         assert_eq!(agent.day_calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn grey() -> EngineReading {
+        sbg_reading(70.0, 700.0, 220.0, -18.0)
+    }
+
+    #[tokio::test]
+    async fn clear_cases_never_call_the_agent() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let engine = h.engine(&agent);
+        let mut sunny = day_memory(SBG_MODE);
+        for minute in [0, 20, 40] {
+            day_tick(&engine, &mut sunny, &sbg_reading(70.0, 500.0, 900.0, 5.0), &ctx(at(26, 11, minute))).await;
+        }
+        let mut dark_forecast = day_memory(SBG_MODE);
+        day_tick(&engine, &mut dark_forecast, &sbg_reading(70.0, 500.0, 60.0, -18.0), &with_forecast(at(26, 11, 0), 80.0)).await;
+        day_tick(&engine, &mut dark_forecast, &sbg_reading(70.0, 500.0, 60.0, -18.0), &with_forecast(at(26, 11, 20), 80.0)).await;
+        assert_eq!(dark_forecast.day.effective_mode, Some(SOLAR_MODE));
+        let mut near_sunset = day_memory(SBG_MODE);
+        day_tick(&engine, &mut near_sunset, &dry_run_solar_reading(97.0, 101.0, 14.0), &ctx(at(26, 17, 43))).await;
+        assert_eq!(agent.day_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_unclear_middle_asks_once_then_only_at_the_recheck_time() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::with_day(vec![day_decision("sbg", 30.0), day_decision("solar", 30.0)]);
+        let engine = h.engine(&agent);
+        let mut memory = day_memory(SBG_MODE);
+        let mixed = |minute| with_forecast(at(26, 11, minute), 250.0);
+        day_tick(&engine, &mut memory, &grey(), &mixed(0)).await;
+        assert_eq!(agent.day_calls.load(Ordering::SeqCst), 0, "dim for under 15 minutes");
+        day_tick(&engine, &mut memory, &grey(), &mixed(15)).await;
+        assert_eq!(agent.day_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(memory.day.effective_mode, Some(SBG_MODE));
+        assert_eq!(memory.day.next_check_at, Some(at(26, 11, 45)));
+        day_tick(&engine, &mut memory, &grey(), &mixed(20)).await;
+        day_tick(&engine, &mut memory, &grey(), &mixed(40)).await;
+        assert_eq!(agent.day_calls.load(Ordering::SeqCst), 1);
+        day_tick(&engine, &mut memory, &grey(), &mixed(45)).await;
+        assert_eq!(agent.day_calls.load(Ordering::SeqCst), 2);
         assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE));
-        assert_eq!(memory.day.next_check_at, Some(at(26, 13, 15)));
+        let row = &h.decisions()[0];
+        assert_eq!((row.mode.as_str(), row.model.as_deref(), row.applied), ("solar", Some("llama-test"), true));
+        assert_eq!(h.state.status().await.ai_model.as_deref(), Some("llama-test"));
+    }
+
+    #[tokio::test]
+    async fn the_agent_cannot_reverse_a_switch_made_minutes_ago() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::with_day(vec![day_decision("solar", 15.0), day_decision("solar", 15.0)]);
+        let engine = h.engine(&agent);
+        let mut memory = day_memory(SBG_MODE);
+        memory.day.last_switch_at = Some(at(26, 11, 5));
+        memory.day.sky = Some((Sky::Grey, at(26, 11, 0)));
+        day_tick(&engine, &mut memory, &grey(), &with_forecast(at(26, 11, 15), 250.0)).await;
+        assert_eq!(memory.day.effective_mode, Some(SBG_MODE), "10 minutes after a switch");
+        assert_eq!(memory.day.next_check_at, Some(at(26, 11, 35)));
+        day_tick(&engine, &mut memory, &grey(), &with_forecast(at(26, 11, 35), 250.0)).await;
+        assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE));
+    }
+
+    #[tokio::test]
+    async fn a_fifth_switch_in_a_day_is_refused() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::with_day(vec![day_decision("solar", 15.0)]);
+        let engine = h.engine(&agent);
+        let mut memory = day_memory(SBG_MODE);
+        memory.day.switches_today = MAX_DAY_SWITCHES;
+        memory.day.last_switch_at = Some(at(26, 8, 0));
+        memory.day.sky = Some((Sky::Grey, at(26, 11, 0)));
+        day_tick(&engine, &mut memory, &grey(), &with_forecast(at(26, 11, 20), 250.0)).await;
+        assert_eq!(memory.day.effective_mode, Some(SBG_MODE));
+        assert_eq!(memory.day.switches_today, MAX_DAY_SWITCHES);
+    }
+
+    #[tokio::test]
+    async fn a_short_drain_in_the_history_never_asks_the_agent() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let engine = h.engine(&agent);
+        let mut memory = day_memory(SBG_MODE);
+        let drain = sbg_reading(70.0, 1500.0, 200.0, -18.0);
+        day_tick(&engine, &mut memory, &drain, &ctx(at(26, 12, 30))).await;
+        day_tick(&engine, &mut memory, &sbg_reading(70.0, 1500.0, 1400.0, 2.0), &ctx(at(26, 12, 35))).await;
+        day_tick(&engine, &mut memory, &drain, &ctx(at(26, 12, 50))).await;
+        assert_eq!(agent.day_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_dim_spell_on_sbg_ticks_every_five_minutes() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let engine = h.engine(&agent);
+        let mut memory = day_memory(SBG_MODE);
+        let sleep = day_tick(&engine, &mut memory, &grey(), &with_forecast(at(26, 11, 0), 250.0)).await;
+        assert_eq!(sleep, DIM_TICK);
+        let sunny = day_tick(&engine, &mut memory, &sbg_reading(70.0, 500.0, 900.0, 5.0), &ctx(at(26, 11, 5))).await;
+        assert_eq!(sunny, normal_interval(&h.config));
+    }
+
+    #[test]
+    fn the_day_input_has_the_last_90_minutes_oldest_first_and_todays_switches() {
+        let now = at(26, 12, 30);
+        let sample = |minute: i64, pv: f64| Sample {
+            at: now - chrono::Duration::minutes(minute),
+            soc: Some(80.0),
+            load_w: Some(600.0),
+            pv_w: Some(pv),
+            battery_a: Some(-4.0),
+            battery_v: Some(52.0),
+            grid_on: Some(true),
+            grid_basis: String::new(),
+            mode: Some("SBG".into()),
+            source: "inverter".into(),
+        };
+        let samples = vec![sample(120, 900.0), sample(85, 800.0), sample(80, 750.0), sample(30, 300.0), sample(26, 250.0), sample(5, 100.0)];
+        let mut context = with_forecast(now, 200.0);
+        context.samples = samples;
+        let decision = |hour: u32, mode: &str, window: &str| DecisionRow {
+            at: at(26, hour, 0),
+            window: window.into(),
+            mode: mode.into(),
+            reserve_soc: None,
+            recheck_minutes: None,
+            confidence: None,
+            dry_run: true,
+            applied: true,
+            reason: format!("{mode} at {hour}"),
+            model: None,
+        };
+        let decisions = vec![decision(10, "solar", "day"), decision(9, "sbg", "day"), decision(3, "solar", "night")];
+        let memory = DayMemory { effective_mode: Some(SBG_MODE), switches_today: 2, last_switch_at: Some(at(26, 10, 0)), ..DayMemory::default() };
+        let input = build_day_input(&context, &sbg_reading(80.0, 600.0, 100.0, -4.0), &memory, Sky::Dark, 40, &decisions, &AutomationConfig::default());
+
+        assert_eq!(input.last_90_min.len(), 4, "the 120-minute-old sample is out; 30 and 26 minutes ago share a bucket");
+        assert!(input.last_90_min.windows(2).all(|pair| pair[0].time < pair[1].time));
+        assert_eq!(input.last_90_min[0].pv_w, Some(800.0));
+        assert_eq!(input.last_90_min.last().unwrap().pv_w, Some(100.0));
+        let switches: Vec<(&str, &str)> = input.today_switches.iter().map(|row| (row.time.as_str(), row.mode.as_str())).collect();
+        assert_eq!(switches, vec![("09:00", "sbg"), ("10:00", "solar")]);
+        assert_eq!((input.sky.as_str(), input.dim_minutes, input.switches_today, input.minutes_since_last_switch), ("dark", 40, 2, Some(150)));
+        assert_eq!(input.forecast.first().map(|row| row.time.as_str()), Some("13:00"));
+        assert_eq!(input.forecast.last().map(|row| row.time.as_str()), Some("18:00"));
     }
 
     #[tokio::test]
     async fn a_low_battery_waits_for_the_usual_night_start_without_asking() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
         night_tick(&h.engine(&agent), &mut memory, &reading(55.0, SOLAR_MODE, 400.0), &ctx(at(26, 18, 30))).await;
         assert_eq!(agent.night_calls.load(Ordering::SeqCst), 0);
@@ -2508,7 +3028,7 @@ mod tests {
     #[tokio::test]
     async fn a_low_battery_still_on_sbg_at_sunset_goes_to_solar() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
         night_tick(&h.engine(&agent), &mut memory, &reading(50.0, SBG_MODE, 400.0), &ctx(at(26, 18, 5))).await;
         assert_eq!(agent.night_calls.load(Ordering::SeqCst), 0);
@@ -2528,7 +3048,7 @@ mod tests {
     #[tokio::test]
     async fn a_full_battery_lets_the_agent_start_the_evening_on_battery() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("sbg", 30.0, 45.0)], vec![]);
+        let agent = FakeAgent::new(vec![plan("sbg", 30.0, 45.0)]);
         let mut memory = night_memory();
         night_tick(&h.engine(&agent), &mut memory, &reading(92.0, SOLAR_MODE, 450.0), &quiet_nights(at(26, 18, 40))).await;
         assert_eq!(agent.night_calls.load(Ordering::SeqCst), 1);
@@ -2558,7 +3078,7 @@ mod tests {
     #[tokio::test]
     async fn an_early_start_that_saves_nothing_is_overruled() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("sbg", 30.0, 45.0)], vec![]);
+        let agent = FakeAgent::new(vec![plan("sbg", 30.0, 45.0)]);
         let mut memory = night_memory();
         night_tick(&h.engine(&agent), &mut memory, &reading(68.0, SOLAR_MODE, 450.0), &ctx(at(26, 18, 40))).await;
         assert_eq!(agent.night_calls.load(Ordering::SeqCst), 1);
@@ -2571,7 +3091,7 @@ mod tests {
     #[tokio::test]
     async fn early_evening_waiting_asks_again_at_the_agents_recheck() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("solar", 30.0, 40.0), plan("sbg", 30.0, 60.0)], vec![]);
+        let agent = FakeAgent::new(vec![plan("solar", 30.0, 40.0), plan("sbg", 30.0, 60.0)]);
         let mut memory = night_memory();
         let engine = h.engine(&agent);
         night_tick(&engine, &mut memory, &reading(85.0, SOLAR_MODE, 900.0), &quiet_nights(at(26, 18, 30))).await;
@@ -2605,7 +3125,7 @@ mod tests {
     #[tokio::test]
     async fn summer_night_turns_smart_load_on_at_night_start() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
         let cap = apply_smart_load(&h.engine(&agent), &mut memory, &reading(80.0, SOLAR_MODE, 300.0), &ctx(in_month(7, 10, 21, 0))).await;
         assert!(cap.is_none());
@@ -2616,7 +3136,7 @@ mod tests {
     #[tokio::test]
     async fn winter_night_waits_for_the_agents_time_then_turns_on() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("solar", 40.0, 60.0)], vec![]);
+        let agent = FakeAgent::new(vec![plan("solar", 40.0, 60.0)]);
         let mut memory = night_memory();
         let engine = h.engine(&agent);
         night_tick(&engine, &mut memory, &reading(45.0, SOLAR_MODE, 300.0), &ctx(at(26, 21, 0))).await;
@@ -2644,7 +3164,7 @@ mod tests {
     #[tokio::test]
     async fn day_turns_smart_load_off_once_and_leaves_manual_changes_alone() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = day_memory(SOLAR_MODE);
         let on = EngineReading { smart_load: Some(true), ..reading(80.0, SOLAR_MODE, 300.0) };
         let engine = h.engine(&agent);
@@ -2657,7 +3177,7 @@ mod tests {
     #[tokio::test]
     async fn smart_load_already_in_place_is_not_rewritten() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
         let on = EngineReading { smart_load: Some(true), ..reading(80.0, SOLAR_MODE, 300.0) };
         apply_smart_load(&h.engine(&agent), &mut memory, &on, &ctx(in_month(6, 10, 21, 30))).await;
@@ -2668,7 +3188,7 @@ mod tests {
     #[tokio::test]
     async fn without_a_battery_reading_smart_load_is_left_alone_at_night() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
         let no_soc = EngineReading { soc: None, battery_a: None, ..reading(0.0, SBG_MODE, 118.0) };
         apply_smart_load(&h.engine(&agent), &mut memory, &no_soc, &ctx(at(28, 6, 24))).await;
@@ -2679,7 +3199,7 @@ mod tests {
     #[tokio::test]
     async fn near_morning_with_enough_battery_smart_load_is_disabled_not_enabled() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let engine = h.engine(&agent);
         let mut memory = night_memory();
         memory.night.last_reserve_soc = Some(28.0);
@@ -2717,7 +3237,7 @@ mod tests {
     #[tokio::test]
     async fn oven_load_on_grid_runs_from_the_battery_for_three_minutes_then_back() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = deciding_on_grid(40.0);
         let engine = h.engine(&agent);
 
@@ -2740,7 +3260,7 @@ mod tests {
     #[tokio::test]
     async fn no_boost_for_normal_loads_or_at_the_reserve() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let engine = h.engine(&agent);
         let mut memory = deciding_on_grid(40.0);
         night_tick(&engine, &mut memory, &oven(800.0), &ctx(at(26, 22, 0))).await;
@@ -2754,7 +3274,7 @@ mod tests {
     #[tokio::test]
     async fn no_boost_before_the_usual_night_start() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = deciding_on_grid(40.0);
         night_tick(&h.engine(&agent), &mut memory, &oven(3000.0), &ctx(at(26, 19, 30))).await;
         assert!(memory.night.boost.is_none());
@@ -2764,7 +3284,7 @@ mod tests {
     #[tokio::test]
     async fn boosts_wait_between_runs_and_stop_after_four() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![], vec![]);
+        let agent = FakeAgent::new(vec![]);
         let engine = h.engine(&agent);
         let mut memory = deciding_on_grid(40.0);
         memory.night.last_boost_end = Some(at(26, 21, 58));

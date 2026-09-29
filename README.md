@@ -15,8 +15,8 @@ JBD BMS over Bluetooth.
 | **Dashboard** | Battery %, charge/discharge rate with a readable time estimate ("15% in ~8 min · around 6:15 AM", "Full in ~2 h 50 min"), solar, house load, grid status, output-source and smart-load controls, a summary of what the automation is doing, and electricity units taken from the grid, per meter. |
 | **Battery** | Pack health, cell voltages and balance, temperatures, protection flags and short trend charts from the BMS. |
 | **Inverter** | Live power flows (solar in, house load, grid), output source, device summary, advanced charger/cutoff settings and every raw field from the cloud. |
-| **Automation** | Tonight's plan and battery projection, the day check, the household routine it has learned, the weather outlook, recent outages, a log of every decision and why, the CSV records folder, and all automation settings. |
-| **Settings** | Solar cloud account, location, Gemini API key, and an optional Groq API key used as a backup. |
+| **Automation** | Tonight's plan and battery projection, the day rule, the household routine it has learned, the weather outlook, recent outages, a log of every decision and why, the CSV records folder, and all automation settings. |
+| **Settings** | Solar cloud account, location, and the Groq and Gemini API keys (both needed; Groq is tried first). |
 
 macOS notifications fire for grid off/back, low battery, high discharge,
 battery temperature, BMS protection and every automation switch.
@@ -27,7 +27,7 @@ battery temperature, BMS protection and every automation switch.
 - [pnpm](https://pnpm.io)
 - Rust (stable) and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for macOS
 - Node.js 20 or newer (the automation agent in `agent/` runs on Node)
-- A [Gemini API key](https://aistudio.google.com/) for automation
+- A [Groq API key](https://console.groq.com/keys) and a [Gemini API key](https://aistudio.google.com/) for automation
 
 ## Getting started
 
@@ -40,8 +40,9 @@ pnpm tauri build    # build a release .app / .dmg
 Then, in the app:
 
 1. **Settings** → enter the Solar cloud account (user ID, password, station
-   and device ID, time zone), your location, and the Gemini API key. The
-   password and API key go into the macOS keychain, never onto disk.
+   and device ID, time zone), your location, and the Groq and Gemini API
+   keys. The password and API keys go into the macOS keychain, never onto
+   disk.
 2. **Battery** → scan for the BMS and connect. The app reconnects to it
    automatically afterwards.
 3. **Automation** → turn it on. It starts in **dry run**, so it only says what
@@ -151,44 +152,51 @@ smart load, even if the load is still high.
 - The load comes from the inverter cloud, which can lag a minute or so behind
   reality, so a boost may start partway into a short oven run.
 
-### Day: will the battery be full by sunset?
+### Day: SBG unless there's no sun
 
-The app projects the battery's charge at sunset from what it *could* take, not
-just what it's getting this minute. For each hour until sunset it works out:
+By day the inverter stays on **SBG**, so the sun and the battery carry the
+house. On SBG a new load (oven, kettle, EV) is first taken from the battery
+while the panels ramp up, and a passing cloud does the same, so short drains
+never switch the mode. Fixed rules settle the clear cases; the AI only judges
+the unclear middle.
 
-- what the panels make now, scaled by the forecast sun for that hour (or from
-  the panel size, if you've entered it),
-- minus your usual house load for that hour (learned from the records, as the
-  median of the last 7 days),
-- capped at the inverter's max charge current setting (e.g. 45 A).
+**The rules decide (no AI call):**
 
-So a big temporary load, like an EV soaking up the sun, doesn't read as "won't
-fill": the battery may only get 10 A now, but it catches up at up to the
-inverter's limit once the load stops. Then:
-
-- If the battery will be full, **SBG** is fine.
-- If it clearly won't (little or no sun), it switches to **Solar**, so the
-  grid carries the house and every bit of solar goes into the battery.
-- In the last hour before sunset with no sun left, it goes to Solar mode.
-  From sunset the night plan takes over (see
+- **Sun stays on SBG.** PV of 300 W or more, or low PV with the battery *not*
+  draining. With a full battery the panels are throttled down to the load, so
+  PV can read 100 W at noon.
+- **Dark now and a dark forecast → Solar** after 15 minutes. "Dark" is PV under
+  150 W with the battery draining.
+- **Grey (150–300 W, draining) with sun forecast** stays on SBG. Grey with a
+  dark forecast goes to Solar after 45 minutes.
+- **On Solar by day it switches back to SBG** once PV has held 300 W for 15
+  minutes.
+- **In the last hour before sunset** with no sun left (under 50 W), it goes
+  to Solar mode. From sunset the night plan takes over (see
   [Evening](#evening-starting-the-battery-early)).
 
-SBG during the day only makes sense while the sun is actually charging the
-battery. If the battery is being drained on SBG (or, in dry run, *would* be),
-it switches to Solar without asking the agent:
+**The AI decides the unclear middle:** grey with a mixed forecast, dark with a
+sunny or mixed forecast, or a dim sky with no forecast. It is asked once the
+sky has been dim for 15 minutes, and then again at the recheck time it chose
+(15–60 minutes). It gets the last 90 minutes of PV, load and battery current
+every 5 minutes, the forecast until sunset, how recent days charged the
+battery, the projected charge at sunset, what tonight usually needs, and
+today's switches. While the sky is dim on SBG the app checks every 5 minutes so
+that history is dense.
 
-- straight away when the sun is done for the day (sunset, or under 50 W of
-  solar in the last hour before sunset),
-- otherwise after two checks in a row, so a passing cloud doesn't flip it.
-  It then waits an hour before reconsidering.
+**Limits the AI can't override:**
 
-Otherwise the agent is only asked when the projection disagrees with the
-current mode, so it can judge the borderline cases, like a passing cloud.
-It's told when the load is well above usual.
+- No switch on a dim spell shorter than 15 minutes.
+- No reversing within 30 minutes of the last switch.
+- At most 4 switches a day.
+- Changing the mode yourself pauses automation until tonight.
+- If the AI fails, the fixed rule above (dark 15 / 45 / 90 minutes depending on
+  the forecast) decides instead.
 
-**Check now** makes the next check ask the agent straight away, even if
-nothing is due and the projection already agrees. The button shows
-"Checking…" until the result is back.
+The Automation tab says what it's waiting for, for example "Little sun
+(60 W) and the battery is draining — staying on SBG; checking again at 11:45
+if it holds". AI decisions show the model that made them. The **Today** card
+still shows the projected charge at sunset.
 
 ### Smart load
 
@@ -364,7 +372,7 @@ src-tauri/src/          Rust backend
   automation/           engine (runner.rs), history (CSV), weather, telemetry,
                         guardrails, agent bridge
   notifications.rs      alert rules and macOS notifications
-agent/                  Node scripts that call Gemini: night.js, day.js, sun.js,
+agent/                  Node scripts that call the AI models: night.js, sun.js,
                         and system.js (the one shared system prompt: modes,
                         smart load, household rules, goals)
 ```
@@ -387,10 +395,10 @@ allowance.
 
 | Order | Model | Free-tier limits |
 |---|---|---|
-| 1 | Groq `openai/gpt-oss-120b` (only with a Groq key) | 1,000 a day, 8,000 tokens a minute |
+| 1 | Groq `openai/gpt-oss-120b` | 1,000 a day, 8,000 tokens a minute |
 | 2 | `gemini-3.5-flash-lite` | 15 a minute, 500 a day |
 | 3 | `gemini-3.1-flash-lite` | 15 a minute, 500 a day |
-| 4 | Groq `openai/gpt-oss-20b` (only with a Groq key) | 1,000 a day, 8,000 tokens a minute |
+| 4 | Groq `openai/gpt-oss-20b` | 1,000 a day, 8,000 tokens a minute |
 | 5–8 | `gemini-3.8-flash`, `3.7-flash`, `3.6-flash`, `3.5-flash` | 5 a minute, 20 a day each |
 | 9 | `gemma-4-26b-a4b-it` | 30 a minute, 14,400 a day |
 
@@ -400,10 +408,10 @@ because it keeps answering when Gemini is busy, but its reasons read worse.
 Everything fits in 50 seconds. Gemini 2.5 Flash and 2.5 Flash Lite still
 show on the limits page, but new API keys get 404 "no longer available to
 new users". The list is `MODELS` in `agent/lib.js`; each provider (Gemini,
-Groq) is one small function there. A Groq key is optional: add it in Settings
-(it's stored in the macOS Keychain like the Gemini key), and without it those
-two models are skipped. A bad key or rejected request skips the rest of that
-provider's models, not the other provider's.
+Groq) is one small function there. Both keys are needed; they're entered in
+Settings and kept in the macOS Keychain, and automation shows "Set a Groq API
+key in Settings" (or Gemini) until both are saved. A bad key or rejected
+request skips the rest of that provider's models, not the other provider's.
 
 Every decision records **which model made it**. The Automation tab shows it
 under each decision ("Decided by Gemini 3.1 Flash Lite", or "the app's own
@@ -419,7 +427,7 @@ pnpm exec tsc --noEmit              # typecheck the frontend
 pnpm build                          # production frontend build
 ```
 
-To try a prompt by hand, put `GEMINI_API_KEY=…` in `agent/.env` (it's
+To try a prompt by hand, put `GROQ_API_KEY=…` and `GEMINI_API_KEY=…` in `agent/.env` (it's
 git-ignored). Then pipe an input in:
 
 ```bash
@@ -439,8 +447,9 @@ time.
 There is no current sensor between the battery and the inverter, so charge and
 discharge amps are only ever read from the Bluetooth BMS. Without the BMS,
 current is unknown rather than guessed. SOC and capacity can still fall back
-to the inverter's own fields. The day check and the battery grid rule both
-need the BMS connected.
+to the inverter's own fields. The battery grid rule needs the BMS connected.
+Without it, the day rule judges "battery draining" from house load minus
+solar instead.
 
 ### Known limitations
 
