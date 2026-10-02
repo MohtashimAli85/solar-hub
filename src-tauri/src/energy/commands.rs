@@ -1,6 +1,8 @@
 use tauri::{AppHandle, State};
 
-use super::units::MeterSwitch;
+use chrono::NaiveDateTime;
+
+use super::units::{MeterAssignment, MeterSwitch};
 use super::{parse_reading_time, switch_time, EnergyConfig, EnergyState, EnergySummary, MAX_STANDBY_W};
 use crate::events;
 
@@ -67,6 +69,48 @@ pub async fn set_active_meter(
         .records
         .append_switch(MeterSwitch { at: when, meter })
         .map_err(|error| format!("Couldn't save the meter change: {error}"))?;
+    let summary = state.rebuild().await;
+    events::emit(&app, events::ENERGY_UPDATED, summary.clone());
+    Ok(summary)
+}
+
+fn parse_moment(text: &str) -> Result<NaiveDateTime, String> {
+    NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%dT%H:%M")
+        .or_else(|_| NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%dT%H:%M:%S"))
+        .map_err(|_| "Pick a date and a time.".to_string())
+}
+
+#[tauri::command]
+pub async fn assign_meter_range(
+    app: AppHandle,
+    state: State<'_, EnergyState>,
+    from: String,
+    to: String,
+    meter: u8,
+) -> Result<EnergySummary, String> {
+    if !matches!(meter, 1 | 2) {
+        return Err("Pick meter 1 or meter 2.".into());
+    }
+    let (from, to) = (parse_moment(&from)?, parse_moment(&to)?);
+    if from >= to {
+        return Err("The start has to be before the end.".into());
+    }
+    if to > state.now().await {
+        return Err("The end hasn't come yet.".into());
+    }
+    state.records.add_assignment(MeterAssignment { from, to, meter })?;
+    let summary = state.rebuild().await;
+    events::emit(&app, events::ENERGY_UPDATED, summary.clone());
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn remove_meter_assignment(
+    app: AppHandle,
+    state: State<'_, EnergyState>,
+    from: String,
+) -> Result<EnergySummary, String> {
+    state.records.remove_assignment(parse_moment(&from)?)?;
     let summary = state.rebuild().await;
     events::emit(&app, events::ENERGY_UPDATED, summary.clone());
     Ok(summary)

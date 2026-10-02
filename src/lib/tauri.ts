@@ -111,6 +111,11 @@ export const setBillReading = (day: number, time: string) =>
 export const setActiveMeter = (meter: MeterNumber, at: string | null) =>
   invoke<EnergySummary>("set_active_meter", { meter, at });
 
+export const assignMeterRange = (from: string, to: string, meter: MeterNumber) =>
+  invoke<EnergySummary>("assign_meter_range", { from, to, meter });
+
+export const removeMeterAssignment = (from: string) => invoke<EnergySummary>("remove_meter_assignment", { from });
+
 export const setStandbyWatts = (watts: number) => invoke<EnergySummary>("set_standby_watts", { watts });
 
 // — Phone access —

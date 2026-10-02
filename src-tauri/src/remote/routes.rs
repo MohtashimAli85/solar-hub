@@ -170,6 +170,10 @@ async fn dispatch(app: &AppHandle, command: &str, args: &Value) -> Result<Option
         "get_energy_summary" => to_json(en::get_energy_summary(app.state()).await),
         "set_bill_reading" => to_json(en::set_bill_reading(app.clone(), app.state(), arg(args, "day")?, arg(args, "time")?).await),
         "set_standby_watts" => to_json(en::set_standby_watts(app.clone(), app.state(), arg(args, "watts")?).await),
+        "assign_meter_range" => to_json(
+            en::assign_meter_range(app.clone(), app.state(), arg(args, "from")?, arg(args, "to")?, arg(args, "meter")?).await,
+        ),
+        "remove_meter_assignment" => to_json(en::remove_meter_assignment(app.clone(), app.state(), arg(args, "from")?).await),
         "set_active_meter" => {
             to_json(en::set_active_meter(app.clone(), app.state(), arg(args, "meter")?, arg(args, "at")?).await)
         }

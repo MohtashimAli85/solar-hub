@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use chrono::{Datelike, Months, NaiveDate, NaiveDateTime};
 
-use super::units::{DayUnits, GridSplit, MeterSwitch};
+use super::units::{DayUnits, GridSplit, MeterAssignment, MeterSwitch};
 use crate::automation::history::{num, opt_f64, split_csv_line, HistoryStore};
 
 const KIND: &str = "energy";
@@ -13,6 +13,8 @@ const DAY_HEADER: &str =
     "date,grid_units,meter1_units,meter2_units,unassigned_units,house_kwh,solar_kwh,battery_kwh,grid_off_minutes,data_hours";
 const SWITCH_HEADER: &str = "timestamp,meter";
 const SWITCHES_FILE: &str = "meter-switches.csv";
+const ASSIGNMENT_HEADER: &str = "from,to,meter";
+const ASSIGNMENTS_FILE: &str = "meter-assignments.csv";
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
@@ -59,6 +61,51 @@ impl EnergyRecords {
             .unwrap_or_default();
         switches.sort_by_key(|switch| switch.at);
         switches
+    }
+
+    fn assignments_path(&self) -> PathBuf {
+        self.store.root().join(KIND).join(ASSIGNMENTS_FILE)
+    }
+
+    pub fn meter_assignments(&self) -> Vec<MeterAssignment> {
+        let mut assignments: Vec<MeterAssignment> = fs::read_to_string(self.assignments_path())
+            .map(|text| text.lines().skip(1).filter_map(parse_assignment).collect())
+            .unwrap_or_default();
+        assignments.sort_by_key(|assignment| assignment.from);
+        assignments
+    }
+
+    fn write_assignments(&self, assignments: &[MeterAssignment]) -> std::io::Result<()> {
+        let path = self.assignments_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut text = format!("{ASSIGNMENT_HEADER}\n");
+        for assignment in assignments {
+            text.push_str(&format!(
+                "{},{},{}\n",
+                assignment.from.format(TIMESTAMP_FORMAT),
+                assignment.to.format(TIMESTAMP_FORMAT),
+                assignment.meter
+            ));
+        }
+        fs::write(path, text)
+    }
+
+    pub fn add_assignment(&self, assignment: MeterAssignment) -> Result<(), String> {
+        let mut assignments = self.meter_assignments();
+        if assignments.iter().any(|existing| existing.overlaps(&assignment)) {
+            return Err("That overlaps a period you already assigned. Remove it first.".into());
+        }
+        assignments.push(assignment);
+        assignments.sort_by_key(|assignment| assignment.from);
+        self.write_assignments(&assignments).map_err(|error| format!("Couldn't save the assignment: {error}"))
+    }
+
+    pub fn remove_assignment(&self, from: NaiveDateTime) -> Result<(), String> {
+        let mut assignments = self.meter_assignments();
+        assignments.retain(|assignment| assignment.from != from);
+        self.write_assignments(&assignments).map_err(|error| format!("Couldn't save the change: {error}"))
     }
 
     pub fn append_switch(&self, switch: MeterSwitch) -> std::io::Result<()> {
@@ -112,6 +159,17 @@ fn parse_day(line: &str) -> Option<DayUnits> {
         data_hours: value(9),
         standby_kwh: 0.0,
     })
+}
+
+fn parse_assignment(line: &str) -> Option<MeterAssignment> {
+    let mut fields = line.split(',');
+    let (from, to, meter) = (fields.next()?, fields.next()?, fields.next()?);
+    let assignment = MeterAssignment {
+        from: NaiveDateTime::parse_from_str(from.trim(), TIMESTAMP_FORMAT).ok()?,
+        to: NaiveDateTime::parse_from_str(to.trim(), TIMESTAMP_FORMAT).ok()?,
+        meter: meter.trim().parse().ok().filter(|meter| matches!(meter, 1 | 2))?,
+    };
+    (assignment.from < assignment.to).then_some(assignment)
 }
 
 fn parse_switch(line: &str) -> Option<MeterSwitch> {
@@ -173,6 +231,21 @@ mod tests {
         let mut file = OpenOptions::new().append(true).open(records.switches_path()).unwrap();
         writeln!(file, "2026-09-28 15:00:00,3").unwrap();
         assert_eq!(records.meter_switches(), vec![earlier, later]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn assignments_round_trip_reject_overlaps_and_can_be_removed() {
+        let (records, dir) = records();
+        let first = MeterAssignment { from: day(9, 23).and_hms_opt(11, 57, 0).unwrap(), to: day(9, 28).and_hms_opt(18, 30, 0).unwrap(), meter: 2 };
+        let overlapping = MeterAssignment { from: day(9, 25).and_hms_opt(0, 0, 0).unwrap(), to: day(9, 26).and_hms_opt(0, 0, 0).unwrap(), meter: 1 };
+        let later = MeterAssignment { from: day(9, 29).and_hms_opt(0, 0, 0).unwrap(), to: day(9, 29).and_hms_opt(6, 0, 0).unwrap(), meter: 1 };
+        records.add_assignment(later).unwrap();
+        records.add_assignment(first).unwrap();
+        assert!(records.add_assignment(overlapping).is_err());
+        assert_eq!(records.meter_assignments(), vec![first, later]);
+        records.remove_assignment(first.from).unwrap();
+        assert_eq!(records.meter_assignments(), vec![later]);
         fs::remove_dir_all(dir).unwrap();
     }
 }

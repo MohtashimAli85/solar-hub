@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/switch";
 import { useEnergyUnits } from "@/hooks/useEnergyUnits";
 import { fmtNumber, fmtTime } from "@/lib/format";
-import type { BillPeriod, DayUnits, EnergySummary, GridSplit, MeterNumber } from "@/lib/types";
+import type { BillPeriod, DayUnits, EnergySummary, GridSplit, MeterAssignment, MeterNumber } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const GRID_FILL: Record<"1" | "2" | "none", string> = {
@@ -48,7 +48,7 @@ function ordinal(day: number): string {
 }
 
 export function UnitsCard() {
-  const { summary, saveReading, saveStandby, switchMeter } = useEnergyUnits();
+  const { summary, saveReading, saveStandby, switchMeter, assignRange, removeAssignment } = useEnergyUnits();
 
   if (!summary) {
     return <section className="h-64 animate-pulse rounded-xl border border-border bg-card motion-reduce:animate-none" />;
@@ -99,6 +99,14 @@ export function UnitsCard() {
           onSave={(watts) => saveStandby.mutate(watts)}
         />
         <StatusLine summary={summary} />
+        <AssignPast
+          assignments={summary.assignments}
+          unassigned={summary.bill?.so_far.unassigned_kwh ?? 0}
+          pending={assignRange.isPending || removeAssignment.isPending}
+          error={assignRange.error ? String(assignRange.error) : removeAssignment.error ? String(removeAssignment.error) : null}
+          onAssign={(from, to, meter) => assignRange.mutateAsync({ from, to, meter })}
+          onRemove={(from) => removeAssignment.mutate(from)}
+        />
         <p className="basis-full leading-snug">
           Counted from the inverter's 5-minute log: the house load that solar and the battery didn't cover while the grid was on,
           plus the inverter's own draw from the grid, which its load reading doesn't show. Raise or lower the watts until the
@@ -106,6 +114,112 @@ export function UnitsCard() {
         </p>
       </div>
     </section>
+  );
+}
+
+function localInputValue(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function AssignPast({
+  assignments,
+  unassigned,
+  pending,
+  error,
+  onAssign,
+  onRemove,
+}: {
+  assignments: MeterAssignment[];
+  unassigned: number;
+  pending: boolean;
+  error: string | null;
+  onAssign: (from: string, to: string, meter: MeterNumber) => Promise<unknown>;
+  onRemove: (from: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [meter, setMeter] = useState<MeterNumber>(2);
+  const field =
+    "h-7 rounded-md border border-border bg-background px-1.5 text-xs pointer-coarse:h-10 pointer-coarse:text-base tabular-nums text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+  const begin = () => {
+    setOpen(true);
+    setTo(localInputValue(new Date()));
+  };
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!from || !to) return;
+    try {
+      await onAssign(from, to, meter);
+      setFrom("");
+      setOpen(false);
+    } catch {
+      return;
+    }
+  };
+
+  return (
+    <div className="basis-full space-y-2">
+      {!open ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={begin}>
+            Assign past units to a meter
+          </Button>
+          {unassigned >= 0.005 ? <span className="tabular-nums">{unitsLabel(unassigned)} this bill aren't assigned yet.</span> : null}
+        </div>
+      ) : (
+        <form onSubmit={submit} className="flex flex-wrap items-center gap-2">
+          <label className="inline-flex items-center gap-1.5">
+            From
+            <input type="datetime-local" className={field} value={from} max={to || undefined} onChange={(event) => setFrom(event.target.value)} />
+          </label>
+          <label className="inline-flex items-center gap-1.5">
+            to
+            <input type="datetime-local" className={field} value={to} min={from || undefined} onChange={(event) => setTo(event.target.value)} />
+          </label>
+          <label className="inline-flex items-center gap-1.5">
+            was on
+            <select className={field} value={meter} onChange={(event) => setMeter(Number(event.target.value) as MeterNumber)}>
+              <option value={1}>Meter 1</option>
+              <option value={2}>Meter 2</option>
+            </select>
+          </label>
+          <Button type="submit" size="sm" disabled={pending || !from || !to}>
+            Assign
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+        </form>
+      )}
+      {assignments.length > 0 ? (
+        <ul className="space-y-1">
+          {assignments.map((assignment) => (
+            <li key={assignment.from} className="flex flex-wrap items-center gap-2 tabular-nums">
+              <span>
+                {readingMoment(assignment.from)} – {readingMoment(assignment.to)}: Meter {assignment.meter}
+              </span>
+              <button
+                type="button"
+                disabled={pending}
+                onClick={() => onRemove(assignment.from)}
+                className="rounded px-1.5 text-foreground underline underline-offset-2 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {error ? (
+        <p role="alert" className="text-destructive">
+          {error}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

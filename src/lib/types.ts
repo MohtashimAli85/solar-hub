@@ -350,6 +350,12 @@ export interface BillPeriod {
 
 export type MeterNumber = 1 | 2;
 
+export interface MeterAssignment {
+  from: string;
+  to: string;
+  meter: MeterNumber;
+}
+
 export interface EnergySummary {
   configured: boolean;
   today: DayUnits | null;
@@ -363,6 +369,7 @@ export interface EnergySummary {
   standby_w: number;
   active_meter: MeterNumber | null;
   active_since: string | null;
+  assignments: MeterAssignment[];
   updated_at: string | null;
   error: string | null;
   backfill: { done: number; total: number } | null;

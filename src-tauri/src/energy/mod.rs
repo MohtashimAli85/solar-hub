@@ -13,7 +13,7 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::automation::history::HistoryStore;
 use records::EnergyRecords;
-use units::{bill_period, compute_day, split_day, BillPeriod, DayUnits, HourUnits, Reading, UnitPoint};
+use units::{bill_period, compute_day, split_day, BillPeriod, DayUnits, HourUnits, MeterAssignment, Reading, UnitPoint};
 
 const RECENT_DAYS: i64 = 14;
 
@@ -88,6 +88,7 @@ pub struct EnergySummary {
     pub standby_w: f64,
     pub active_meter: Option<u8>,
     pub active_since: Option<NaiveDateTime>,
+    pub assignments: Vec<MeterAssignment>,
     pub updated_at: Option<NaiveDateTime>,
     pub error: Option<String>,
     pub backfill: Option<Backfill>,
@@ -214,6 +215,8 @@ impl EnergyState {
         let reading = config.reading();
         let standby_w = config.standby_w.clamp(0.0, MAX_STANDBY_W);
         let switches = self.records.meter_switches();
+        let assignments = self.records.meter_assignments();
+        let first_switch = switches.first().map(|switch| switch.at);
         let live = self.live.lock().await;
         let now = local_now(live.tz);
         let today = now.date();
@@ -228,7 +231,11 @@ impl EnergyState {
                 } else {
                     live.reading_days.get(&start.date())?
                 };
-                Some((start.date(), split_day(points, &switches, start, now).with_standby(standby_w)))
+                let day_end = (start.date().and_time(NaiveTime::MIN) + Duration::days(1)).min(now);
+                let split = split_day(points, &switches, start, now)
+                    .with_standby(standby_w)
+                    .with_assignments(start, day_end, first_switch, &assignments);
+                Some((start.date(), split))
             })
             .collect();
         let (configured, updated_at, error, backfill) = (live.configured, live.updated_at, live.error.clone(), live.backfill);
@@ -240,10 +247,16 @@ impl EnergyState {
             .days_between(previous_start.date(), today)
             .into_iter()
             .filter(|day| day.date < today)
-            .map(|day| day.with_standby(standby_w))
+            .map(|day| {
+                let start = day.date.and_time(NaiveTime::MIN);
+                day.with_standby(standby_w).with_assignments((start, start + Duration::days(1)), first_switch, &assignments)
+            })
             .collect();
         let (today_units, today_hourly) = match today_report {
-            Some((units, hourly)) => (Some(units.with_standby(standby_w)), hourly),
+            Some((units, hourly)) => {
+                let start = today.and_time(NaiveTime::MIN);
+                (Some(units.with_standby(standby_w).with_assignments((start, now), first_switch, &assignments)), hourly)
+            }
             None => (None, Vec::new()),
         };
         if let Some(units) = &today_units {
@@ -269,6 +282,7 @@ impl EnergyState {
             standby_w,
             active_meter,
             active_since: active.map(|switch| switch.at),
+            assignments,
             updated_at,
             error,
             backfill,

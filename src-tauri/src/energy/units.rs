@@ -61,6 +61,21 @@ pub fn meter_at(switches: &[MeterSwitch], at: NaiveDateTime) -> Option<u8> {
     switches.iter().take_while(|switch| switch.at <= at).last().map(|switch| switch.meter)
 }
 
+/// A stretch of past time the homeowner says was on one meter. It moves the
+/// units nobody assigned in that stretch to the meter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MeterAssignment {
+    pub from: NaiveDateTime,
+    pub to: NaiveDateTime,
+    pub meter: u8,
+}
+
+impl MeterAssignment {
+    pub fn overlaps(&self, other: &MeterAssignment) -> bool {
+        self.from < other.to && other.from < self.to
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
 pub struct GridSplit {
     pub grid_kwh: f64,
@@ -149,6 +164,36 @@ impl DayUnits {
         self.grid.unassigned_kwh += extra * (1.0 - m1 - m2);
         self.grid.grid_kwh += extra;
         self.standby_kwh += extra;
+        self
+    }
+
+    /// Moves the unassigned units in `window` to the meters in `assignments`,
+    /// pro rata by the clock. Only the time before the first changeover is
+    /// unassigned, so that is the stretch the assignments are measured against.
+    pub fn with_assignments(
+        mut self,
+        window: (NaiveDateTime, NaiveDateTime),
+        first_switch: Option<NaiveDateTime>,
+        assignments: &[MeterAssignment],
+    ) -> DayUnits {
+        let unassigned_until = first_switch.map_or(window.1, |at| at.min(window.1));
+        let span = (unassigned_until - window.0).num_seconds() as f64;
+        if span <= 0.0 {
+            return self;
+        }
+        let original = self.grid.unassigned_kwh;
+        for assignment in assignments {
+            let overlap = (assignment.to.min(unassigned_until) - assignment.from.max(window.0)).num_seconds() as f64;
+            if overlap <= 0.0 {
+                continue;
+            }
+            let moved = (original * overlap / span).min(self.grid.unassigned_kwh);
+            self.grid.unassigned_kwh -= moved;
+            match assignment.meter {
+                1 => self.grid.meter1_kwh += moved,
+                _ => self.grid.meter2_kwh += moved,
+            }
+        }
         self
     }
 
@@ -303,6 +348,17 @@ pub struct DaySplit {
 impl DaySplit {
     pub fn with_standby(self, watts: f64) -> DaySplit {
         DaySplit { before: self.before.with_standby(watts), after: self.after.with_standby(watts) }
+    }
+}
+
+impl DaySplit {
+    pub fn with_assignments(self, at: NaiveDateTime, day_end: NaiveDateTime, first_switch: Option<NaiveDateTime>, assignments: &[MeterAssignment]) -> DaySplit {
+        let day_start = at.date().and_time(NaiveTime::MIN);
+        let cut = at.min(day_end);
+        DaySplit {
+            before: self.before.with_assignments((day_start, cut), first_switch, assignments),
+            after: self.after.with_assignments((cut, day_end), first_switch, assignments),
+        }
     }
 }
 
@@ -603,5 +659,44 @@ mod tests {
         assert!(close(points[0].house_w, 240.0));
         assert!(close(points[0].discharge_w, 338.0));
         assert!(points[0].grid_on);
+    }
+
+    fn unassigned_day(kwh: f64) -> DayUnits {
+        let mut units = DayUnits::empty(day(26));
+        units.grid.grid_kwh = kwh;
+        units.grid.unassigned_kwh = kwh;
+        units
+    }
+
+    #[test]
+    fn assigning_a_whole_stretch_moves_all_its_unassigned_units() {
+        let window = (at(26, 0, 0), at(27, 0, 0));
+        let assignment = MeterAssignment { from: at(25, 12, 0), to: at(27, 6, 0), meter: 2 };
+        let units = unassigned_day(1.2).with_assignments(window, None, &[assignment]);
+        assert!(close(units.grid.meter2_kwh, 1.2));
+        assert!(close(units.grid.unassigned_kwh, 0.0));
+        assert!(close(units.grid.grid_kwh, 1.2), "the total never changes");
+    }
+
+    #[test]
+    fn a_partial_stretch_moves_its_share_and_only_the_time_before_the_first_switch_counts() {
+        let window = (at(26, 0, 0), at(27, 0, 0));
+        let first_half = MeterAssignment { from: at(26, 0, 0), to: at(26, 6, 0), meter: 1 };
+        let units = unassigned_day(1.0).with_assignments(window, Some(at(26, 12, 0)), &[first_half]);
+        assert!(close(units.grid.meter1_kwh, 0.5), "6 of the 12 unassigned hours");
+        assert!(close(units.grid.unassigned_kwh, 0.5));
+
+        let after_the_switch = MeterAssignment { from: at(26, 13, 0), to: at(26, 20, 0), meter: 1 };
+        let untouched = unassigned_day(1.0).with_assignments(window, Some(at(26, 12, 0)), &[after_the_switch]);
+        assert!(close(untouched.grid.unassigned_kwh, 1.0));
+    }
+
+    #[test]
+    fn overlapping_assignments_are_detected() {
+        let a = MeterAssignment { from: at(25, 0, 0), to: at(26, 0, 0), meter: 1 };
+        let b = MeterAssignment { from: at(25, 12, 0), to: at(27, 0, 0), meter: 2 };
+        let c = MeterAssignment { from: at(26, 0, 0), to: at(27, 0, 0), meter: 2 };
+        assert!(a.overlaps(&b));
+        assert!(!a.overlaps(&c), "touching ends don't overlap");
     }
 }
