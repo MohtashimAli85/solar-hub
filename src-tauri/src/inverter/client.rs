@@ -320,6 +320,10 @@ impl SolarClient {
         Ok(snapshot)
     }
 
+    pub async fn forget_energy_flow(&self) {
+        *self.energy_flow_cache.lock().await = None;
+    }
+
     async fn energy_flow_with_fallback(&self, device_id: &str) -> (Option<EnergyFlowData>, bool) {
         let mut fresh = None;
         for attempt in 1..=2 {

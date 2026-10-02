@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use tauri::AppHandle;
 
 use crate::automation::agent::{
@@ -32,12 +32,22 @@ const VERIFY_SAMPLES_NEEDED: usize = 5;
 const FAST_TICK: Duration = Duration::from_secs(60);
 const NEAR_RESERVE_TICK: Duration = Duration::from_secs(300);
 const NEAR_RESERVE_MARGIN: f64 = 5.0;
+/// This close to the floor the battery can't run the house, so the AI isn't asked.
+const NEAR_FLOOR_MARGIN: f64 = 3.0;
 const MAX_AI_FAILURES: u32 = 3;
 const AI_RETRY_MINUTES: i64 = 15;
 const SAMPLE_EVERY: Duration = Duration::from_secs(290);
 const WEATHER_REFRESH: Duration = Duration::from_secs(30 * 60);
 const WEATHER_RETRY: Duration = Duration::from_secs(10 * 60);
 const WEATHER_MAX_AGE: Duration = Duration::from_secs(6 * 3600);
+/// A failed read right after a wake is usually Wi-Fi still reconnecting, so
+/// it is retried soon instead of waiting the whole check interval.
+const READ_RETRY: [Duration; 4] = [
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(120),
+    Duration::from_secs(300),
+];
 const MIN_RECHECK_MINUTES: f64 = 15.0;
 const MAX_RECHECK_MINUTES: f64 = 120.0;
 const MAX_RESERVE_SOC: f64 = 95.0;
@@ -325,6 +335,10 @@ fn hhmm(at: NaiveDateTime) -> String {
     at.format("%H:%M").to_string()
 }
 
+fn clock_time(at: NaiveDateTime) -> String {
+    at.format("%-I:%M %p").to_string()
+}
+
 fn mode_label(mode: Option<u32>) -> Option<String> {
     mode.map(output_mode_name)
 }
@@ -553,7 +567,7 @@ struct SunCache {
 }
 
 struct WeatherCache {
-    fetched_at: Instant,
+    fetched_at: DateTime<Utc>,
     latitude: f64,
     longitude: f64,
     forecast: Forecast,
@@ -566,12 +580,13 @@ pub struct EngineMemory {
     day: DayMemory,
     sun_cache: Option<SunCache>,
     weather: Option<WeatherCache>,
-    weather_failed_at: Option<Instant>,
+    weather_failed_at: Option<DateTime<Utc>>,
     blocked_notified: Option<String>,
     last_sample_at: Option<Instant>,
     last_mode: Option<u32>,
     dry_run: Option<bool>,
     started_at: Option<Instant>,
+    read_failures: usize,
 }
 
 impl EngineMemory {
@@ -581,6 +596,16 @@ impl EngineMemory {
         self.day = DayMemory::default();
         self.blocked_notified = None;
     }
+}
+
+fn age(at: DateTime<Utc>) -> Duration {
+    (Utc::now() - at).to_std().unwrap_or_default()
+}
+
+fn read_retry(memory: &mut EngineMemory, config: &AutomationConfig) -> Duration {
+    let wait = READ_RETRY[memory.read_failures.min(READ_RETRY.len() - 1)];
+    memory.read_failures += 1;
+    wait.min(normal_interval(config))
 }
 
 fn same_place(a: (f64, f64), b: (f64, f64)) -> bool {
@@ -606,15 +631,15 @@ async fn ensure_sun(memory: &mut EngineMemory, agent: &dyn AgentRunner, latitude
 
 async fn refresh_weather(memory: &mut EngineMemory, http: &reqwest::Client, latitude: f64, longitude: f64) {
     let fresh = memory.weather.as_ref().is_some_and(|cache| {
-        same_place((cache.latitude, cache.longitude), (latitude, longitude)) && cache.fetched_at.elapsed() < WEATHER_REFRESH
+        same_place((cache.latitude, cache.longitude), (latitude, longitude)) && age(cache.fetched_at) < WEATHER_REFRESH
     });
-    if fresh || memory.weather_failed_at.is_some_and(|at| at.elapsed() < WEATHER_RETRY) {
+    if fresh || memory.weather_failed_at.is_some_and(|at| age(at) < WEATHER_RETRY) {
         return;
     }
     match weather::fetch(http, latitude, longitude).await {
         Ok(forecast) => {
             memory.weather = Some(WeatherCache {
-                fetched_at: Instant::now(),
+                fetched_at: Utc::now(),
                 latitude,
                 longitude,
                 forecast,
@@ -623,7 +648,7 @@ async fn refresh_weather(memory: &mut EngineMemory, http: &reqwest::Client, lati
         }
         Err(error) => {
             tracing::warn!("weather forecast unavailable: {error}");
-            memory.weather_failed_at = Some(Instant::now());
+            memory.weather_failed_at = Some(Utc::now());
         }
     }
 }
@@ -633,7 +658,7 @@ fn usable_forecast(memory: &EngineMemory, latitude: f64, longitude: f64) -> Opti
         .weather
         .as_ref()
         .filter(|cache| {
-            same_place((cache.latitude, cache.longitude), (latitude, longitude)) && cache.fetched_at.elapsed() < WEATHER_MAX_AGE
+            same_place((cache.latitude, cache.longitude), (latitude, longitude)) && age(cache.fetched_at) < WEATHER_MAX_AGE
         })
         .map(|cache| cache.forecast.clone())
 }
@@ -703,13 +728,14 @@ async fn tick(
 
     let reading = match services.client.read_inverter_snapshot(None).await {
         Ok(snapshot) => {
+            memory.read_failures = 0;
             memory.last_mode = snapshot.output_mode().or(memory.last_mode);
             EngineReading::from_snapshot(&snapshot, bms.as_ref(), config)
         }
         Err(error) => {
             tracing::warn!("automation could not read inverter snapshot: {error}");
             let Some(bms) = bms.as_ref() else {
-                return normal_interval(config);
+                return read_retry(memory, config);
             };
             let reading = EngineReading::from_bms_only(bms, memory.last_mode, config);
             services.notifier.observe(NotifyReading { grid_on: reading.grid_on(), ..NotifyReading::default() }).await;
@@ -717,7 +743,7 @@ async fn tick(
             state
                 .set_status(|status| status.blocked_reason = Some("Inverter cloud unreachable — recording from the battery only".into()))
                 .await;
-            return normal_interval(config);
+            return read_retry(memory, config);
         }
     };
 
@@ -988,7 +1014,7 @@ async fn apply_smart_load(engine: &Engine<'_>, memory: &mut EngineMemory, readin
                 let reason = if is_summer(ctx.clock.night()) {
                     "enable smart load for the night — cutting heavy and non-UPS loads to protect the battery (summer)".to_string()
                 } else {
-                    format!("enable smart load for the night — cutting heavy and non-UPS loads to protect the battery (winter, from {})", hhmm(due))
+                    format!("enable smart load for the night — cutting heavy and non-UPS loads to protect the battery (winter, from {})", clock_time(due))
                 };
                 (true, due, reason)
             }
@@ -1467,7 +1493,7 @@ async fn night_deciding(
         let soc = soc.unwrap_or_default();
         let reason = format!(
             "Solar mode until {} — at {} the battery is kept for the night rather than the evening.",
-            hhmm(usual_start),
+            clock_time(usual_start),
             fmt_pct(soc.round())
         );
         if memory.night.effective_mode == Some(SBG_MODE) {
@@ -1502,6 +1528,10 @@ async fn night_deciding(
         engine.set_reason("Waiting for a battery SOC reading.").await;
         return normal_interval(config);
     };
+    if soc - config.min_soc_percent < NEAR_FLOOR_MARGIN {
+        engine.set_reason("The battery is at the floor — Solar mode until the sun is up.").await;
+        return normal_interval(config);
+    }
 
     let discharge = estimate_discharge_a(reading.load_w, reading.pv_w, reading.batt_v).unwrap_or(reading.discharge_a);
     let input = build_night_input(ctx, reading, &memory.night, config, soc, discharge, false);
@@ -1528,7 +1558,7 @@ async fn night_deciding(
     if plan.on_battery && waiting_leaves.is_some_and(|left| left <= plan.reserve_soc) {
         let reason = format!(
             "Solar mode until {} — the battery is needed for the night: waiting would leave only about {} by sunrise, under the {} reserve.",
-            hhmm(usual_start),
+            clock_time(usual_start),
             fmt_pct(waiting_leaves.unwrap_or_default().max(0.0).round()),
             fmt_pct(plan.reserve_soc)
         );
@@ -1851,7 +1881,7 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
     engine.set_phase(Phase::Day).await;
 
     if sun_is_done(ctx, reading) {
-        let evening = hhmm(ctx.clock.evening_start_on(now.date()));
+        let evening = clock_time(ctx.clock.evening_start_on(now.date()));
         let sun = if now >= ctx.clock.sunset_today { "The sun has set" } else { "The sun is done for the day" };
         let reason = format!("{sun} — Solar mode, keeping the battery for tonight; the night plan starts at {evening}.");
         let notice = format!("switch to Solar — {}, keeping the battery for tonight", sun.to_lowercase());
@@ -1910,10 +1940,10 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
     if now < switch_at {
         day.next_check_at = Some(switch_at);
         let reason = match seen {
-            Sky::Sun => format!("The sun is back ({pv} W) — back to SBG at {} if it holds.", hhmm(switch_at)),
+            Sky::Sun => format!("The sun is back ({pv} W) — back to SBG at {} if it holds.", clock_time(switch_at)),
             _ => format!(
                 "Little sun ({pv} W){forecast} and the battery is draining — staying on SBG; Solar mode at {} if it holds.",
-                hhmm(switch_at)
+                clock_time(switch_at)
             ),
         };
         engine.set_reason(&reason).await;
@@ -1965,7 +1995,7 @@ async fn ask_day_agent(
         engine
             .set_reason(&format!(
                 "Little sun ({pv} W) and the battery is draining — staying on SBG; checking again at {} if it holds.",
-                hhmm(ask_at)
+                clock_time(ask_at)
             ))
             .await;
         return Some(until(now, day.next_check_at, normal_interval(config)));
@@ -2293,6 +2323,14 @@ mod tests {
         NaiveDate::from_ymd_opt(2026, 9, day).unwrap().and_hms_opt(hour, minute, 0).unwrap()
     }
 
+    #[test]
+    fn failed_reads_retry_soon_then_back_off() {
+        let config = AutomationConfig::default();
+        let mut memory = EngineMemory::default();
+        let waits: Vec<u64> = (0..6).map(|_| read_retry(&mut memory, &config).as_secs()).collect();
+        assert_eq!(waits, vec![30, 60, 120, 300, 300, 300]);
+    }
+
     fn clock(now: NaiveDateTime) -> Clock {
         let date = now.date();
         Clock {
@@ -2563,6 +2601,18 @@ mod tests {
         assert_eq!(agent.night_calls.load(Ordering::SeqCst), 1);
         assert_eq!(memory.night.phase, NightPhase::Deciding);
         assert_eq!(memory.night.next_check_at, Some(at(26, 22, 5)));
+    }
+
+    #[tokio::test]
+    async fn a_battery_at_the_floor_does_not_ask_the_agent() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let mut memory = night_memory();
+        memory.night.effective_mode = Some(SOLAR_MODE);
+        night_tick(&h.engine(&agent), &mut memory, &reading(22.0, SOLAR_MODE, 300.0), &ctx(at(27, 3, 0))).await;
+
+        assert_eq!(agent.night_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(memory.night.phase, NightPhase::Deciding);
     }
 
     #[tokio::test]

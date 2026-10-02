@@ -3,6 +3,7 @@ pub const BATTERY_CONNECTION: &str = "battery://connection";
 pub const INVERTER_SNAPSHOT: &str = "inverter://snapshot";
 pub const AUTOMATION_STATUS: &str = "automation://status";
 pub const ENERGY_UPDATED: &str = "energy://updated";
+pub const SYSTEM_RESUMED: &str = "system://resumed";
 
 use std::sync::OnceLock;
 

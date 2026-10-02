@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use btleplug::api::{
@@ -274,6 +275,59 @@ pub fn handle_link_lost(
     });
 }
 
+async fn bluetooth_powered_off(central: &Adapter) -> bool {
+    matches!(
+        with_timeout(
+            Duration::from_secs(5),
+            "read Bluetooth state",
+            central.adapter_state().map_err(|error| error.to_string()),
+        )
+        .await,
+        Ok(CentralState::PoweredOff)
+    )
+}
+
+/// The battery % comes over Bluetooth, so when it is switched off the app
+/// turns it back on, and only asks the user when that doesn't work.
+fn handle_bluetooth_off(state: BatteryState, app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        if !load_saved_ble_device(&app).is_some_and(|device| !device.id.is_empty()) {
+            return;
+        }
+        if state.inner.bluetooth_off_handled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!("Bluetooth is off, trying to turn it on");
+        if super::power::request_on() {
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if super::power::is_on() == Some(true) {
+                    tracing::info!("Bluetooth turned back on");
+                    state.inner.reconnect_kick.notify_one();
+                    return;
+                }
+            }
+        }
+        tracing::warn!("could not turn Bluetooth on");
+        if let Some(notifier) = tauri::Manager::try_state::<Notifier>(&app) {
+            notifier.send("Bluetooth is off", "Turn Bluetooth on so Solar Hub can read the battery.");
+        }
+    });
+}
+
+pub async fn on_resume(state: BatteryState, app: AppHandle) {
+    if let Ok(central) = get_central(&state).await {
+        if bluetooth_powered_off(&central).await {
+            handle_bluetooth_off(state, app);
+            return;
+        }
+    }
+    if !state.connection_status().await.connected {
+        spawn_reconnect_loop(state.clone(), app);
+        state.inner.reconnect_kick.notify_one();
+    }
+}
+
 pub fn spawn_disconnect_watcher(state: BatteryState, app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tracing::info!("disconnect watcher started");
@@ -295,6 +349,9 @@ pub fn spawn_disconnect_watcher(state: BatteryState, app: AppHandle) {
                 }
             };
             tracing::info!("disconnect watcher listening on adapter");
+            if bluetooth_powered_off(&central).await {
+                handle_bluetooth_off(state.clone(), app.clone());
+            }
             loop {
                 tokio::select! {
                     event = events.next() => {
@@ -309,7 +366,11 @@ pub fn spawn_disconnect_watcher(state: BatteryState, app: AppHandle) {
                                 );
                             }
                             Some(CentralEvent::StateUpdate(CentralState::PoweredOn)) => {
+                                state.inner.bluetooth_off_handled.store(false, Ordering::SeqCst);
                                 state.inner.reconnect_kick.notify_one();
+                            }
+                            Some(CentralEvent::StateUpdate(CentralState::PoweredOff)) => {
+                                handle_bluetooth_off(state.clone(), app.clone());
                             }
                             Some(_) => {}
                             None => {

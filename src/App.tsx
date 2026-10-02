@@ -3,7 +3,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { useTheme } from "@/hooks/useTheme";
 import { BottomNav, MobileHeader, NavRail, Sidebar, type Tab } from "@/components/layout/AppNav";
 import { PairScreen } from "@/components/remote/PairScreen";
-import { hasPhoneToken, isDesktop, onPairingNeeded } from "@/lib/transport";
+import { hasPhoneToken, isDesktop, listen, onPairingNeeded } from "@/lib/transport";
 import { DashboardPage } from "@/pages/DashboardPage";
 
 const AutomationPage = lazy(() => import("@/pages/AutomationPage").then((m) => ({ default: m.AutomationPage })));
@@ -29,6 +29,15 @@ function Shell() {
   useEffect(() => {
     if (isDesktop) return;
     return onPairingNeeded(() => setPaired(false));
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen("system://resumed", () => {
+      void queryClient.invalidateQueries();
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
   }, []);
 
   if (!paired) {

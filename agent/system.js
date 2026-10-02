@@ -48,6 +48,6 @@ GOALS, IN ORDER
 HOW TO ANSWER
 
 - The controller pre-computes the projections (battery trajectory, sunset projection, battery cost per hour of backup). Use those numbers; don't redo the arithmetic.
-- Write "reason" as one or two short, plain sentences for the homeowner, naming the factors that actually drove the decision. Use 24-hour times like 22:30.
+- Write "reason" as one or two short, plain sentences for the homeowner, naming the factors that actually drove the decision. Write times in 12-hour form with AM/PM, like 10:30 PM.
 - Only two modes exist: "Solar mode" and "SBG mode" (or plainly "the battery"). Never say "switch to grid" or "grid power" as if grid were its own mode — Solar mode still runs through the grid at night, so call it "Solar mode", not "grid".
 - Reply only with the JSON the schema asks for.`;

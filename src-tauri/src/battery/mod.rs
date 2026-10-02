@@ -1,8 +1,10 @@
 pub mod commands;
 pub mod jbd_protocol;
 pub mod manager;
+pub mod power;
 pub mod types;
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -42,6 +44,7 @@ pub struct BatteryInner {
     pub central_changed: Notify,
     pub session_tasks: Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
     pub reconnect_kick: Notify,
+    pub bluetooth_off_handled: AtomicBool,
 }
 
 impl BatteryInner {
@@ -62,6 +65,7 @@ impl BatteryInner {
             central_changed: Notify::new(),
             session_tasks: Mutex::new(Vec::new()),
             reconnect_kick: Notify::new(),
+            bluetooth_off_handled: AtomicBool::new(false),
         }
     }
 }

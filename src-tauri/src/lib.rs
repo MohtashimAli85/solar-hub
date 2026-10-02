@@ -14,6 +14,7 @@ pub mod events;
 pub mod inverter;
 pub mod notifications;
 pub mod remote;
+pub mod resume;
 pub mod state;
 pub mod storage;
 
@@ -31,7 +32,11 @@ fn init_logging(log_dir: &std::path::Path) -> LogGuard {
     let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
+    let filter = tracing_subscriber::filter::Targets::new()
+        .with_default(tracing::Level::INFO)
+        .with_target("btleplug", tracing::Level::WARN);
     let _ = tracing_subscriber::registry()
+        .with(filter)
         .with(file_layer)
         .with(stderr_layer)
         .try_init();
@@ -103,6 +108,7 @@ pub fn run() {
                 }
             });
 
+            resume::spawn(handle.clone(), automation.clone(), energy.clone(), battery.clone(), client.clone());
             energy::runner::spawn(energy, client.clone(), handle.clone());
             automation::runner::spawn(automation, client, battery, notifier, handle.clone());
             Ok(())
@@ -143,6 +149,8 @@ pub fn run() {
             energy::commands::set_bill_reading,
             energy::commands::set_active_meter,
             energy::commands::set_standby_watts,
+            energy::commands::assign_meter_range,
+            energy::commands::remove_meter_assignment,
             remote::commands::get_remote_status,
             remote::commands::set_remote_enabled,
             remote::commands::regenerate_remote_pin,
