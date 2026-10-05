@@ -89,7 +89,9 @@ export function flowPowerWatts(flow: unknown): number | null {
   }
   const parsed = typeof raw === "number" ? raw : typeof raw === "string" ? parseFloat(raw) : NaN;
   if (!Number.isFinite(parsed)) return null;
-  return typeof unit === "string" && unit.toLowerCase() === "kw" ? parsed * 1000 : parsed;
+  const unitText = typeof unit === "string" ? unit.toLowerCase() : "";
+  if (unitText === "kw") return parsed * 1000;
+  return unitText === "" || unitText === "w" ? parsed : null;
 }
 
 export function fieldPowerWatts(fields: InverterFields, names: string[]): number | null {

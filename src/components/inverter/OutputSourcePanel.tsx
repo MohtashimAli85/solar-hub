@@ -1,11 +1,12 @@
 import { Switch } from "@/components/ui/switch";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { OUTPUT_MODES } from "@/lib/types";
 import type { InverterSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Loader2 } from "lucide-react";
 
 const MODE_HINTS: Record<string, string> = {
-  "0": "Solar: panels first, then grid. The battery is only used when both are gone.",
+  "0": "Solar: panels first, then grid. The battery only powers the house when both are gone.",
   "1": "SBG: panels first, then battery, then grid.",
   "2": "Utility: grid first, then battery. The panels don't power the house.",
 };
@@ -54,37 +55,32 @@ export function OutputSourcePanel({
           </span>
         ) : (
           <span className="text-xs tabular-nums text-muted-foreground">
-            charger <span className="text-foreground">{settings?.charger_source_priority ?? "–"}</span>
+            Charging from <span className="text-foreground">{settings?.charger_source_priority ?? "–"}</span>
           </span>
         )}
       </div>
 
-      <div
-        role="tablist"
+      <ToggleGroup
         aria-label="Output source priority"
-        className="mt-3 grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted p-1"
+        value={currentValue != null ? [String(currentValue)] : []}
+        onValueChange={(next) => {
+          const mode = next[0];
+          if (mode != null && mode !== String(currentValue)) onSet(mode);
+        }}
+        disabled={disabled || pending}
+        spacing={1}
+        className="mt-3 grid w-full grid-cols-3 rounded-lg border border-border p-1"
       >
-        {OUTPUT_MODES.map((mode) => {
-          const active = currentValue != null && String(currentValue) === mode.value;
-          return (
-            <button
-              key={mode.value}
-              role="tab"
-              aria-selected={active}
-              disabled={disabled || pending}
-              onClick={() => onSet(mode.value)}
-              className={cn(
-                "rounded-md px-1.5 py-2 text-xs font-semibold tracking-wide transition-colors sm:px-2 sm:text-sm pointer-coarse:py-3 disabled:cursor-not-allowed disabled:opacity-50",
-                active
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground",
-              )}
-            >
-              {mode.label}
-            </button>
-          );
-        })}
-      </div>
+        {OUTPUT_MODES.map((mode) => (
+          <ToggleGroupItem
+            key={mode.value}
+            value={mode.value}
+            className="h-auto rounded-md px-1.5 py-2 text-xs font-semibold tracking-wide sm:px-2 sm:text-sm pointer-coarse:py-3"
+          >
+            {mode.label}
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
       <p className="mt-2 text-micro leading-snug text-muted-foreground">
         {MODE_HINTS[String(currentValue ?? "")] ?? "Pick where the house draws power from."} Changing it by hand pauses automation until the next window.
       </p>
@@ -98,7 +94,7 @@ export function OutputSourcePanel({
         <div>
           <p className="text-sm font-medium">
             Smart load{" "}
-            <span className={cn("text-xs", smartLoadOn ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")}>
+            <span className="text-xs text-muted-foreground">
               {smartLoadOn ? "on — heavy loads cut" : "off — everything runs"}
             </span>
           </p>

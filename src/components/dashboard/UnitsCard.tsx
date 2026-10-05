@@ -1,15 +1,19 @@
+import { TriangleAlert } from "lucide-react";
+import { Bar, BarChart, CartesianGrid, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useState, type CSSProperties, type FormEvent } from "react";
+import { CHART_FONT, ChartTooltipBox, VIZ } from "@/components/automation/shared";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/switch";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useEnergyUnits } from "@/hooks/useEnergyUnits";
 import { fmtNumber, fmtTime } from "@/lib/format";
 import type { BillPeriod, DayUnits, EnergySummary, GridSplit, MeterAssignment, MeterNumber } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const GRID_FILL: Record<"1" | "2" | "none", string> = {
-  "1": "var(--viz-accent)",
-  "2": "color-mix(in oklch, var(--viz-accent) 42%, transparent)",
-  none: "var(--viz-context-strong)",
+  "1": "var(--viz-meter-1)",
+  "2": "var(--viz-meter-2)",
+  none: "var(--viz-unassigned)",
 };
 const READING_DAYS = Array.from({ length: 28 }, (_, index) => index + 1);
 
@@ -80,7 +84,7 @@ export function UnitsCard() {
         <div className="grid grid-cols-1 lg:grid-cols-3 lg:divide-x">
           <TodayColumn summary={summary} />
           <BillsColumn summary={summary} />
-          <RecentColumn days={summary.recent_days} />
+          <RecentColumn days={summary.recent_days} billStart={summary.bill?.start ?? null} />
         </div>
       )}
 
@@ -403,16 +407,16 @@ function TodayColumn({ summary }: { summary: EnergySummary }) {
         <>
           <MeterRegister kwh={today.grid_kwh} />
           <p className="mt-3 text-sm tabular-nums">
-            The house used <span className="font-semibold">{fmtNumber(today.house_kwh, 2)} kWh</span>
+            The house used <span className="font-semibold">{today.house_kwh.toFixed(2)} kWh</span>
           </p>
           <ShareBar day={today} />
         </>
       ) : summary.error ? (
         <p className="mt-2 text-sm text-muted-foreground">Today's numbers show up once the inverter cloud answers.</p>
       ) : (
-        <div className="mt-2 space-y-2">
+        <div className="mt-2 space-y-2" role="status">
           <Skeleton className="h-12 w-52" />
-          <Skeleton className="h-3 w-40" />
+          <p className="text-xs text-muted-foreground">Fetching today's log from the inverter cloud…</p>
         </div>
       )}
       <p className="mt-4 border-t pt-3 text-xs tabular-nums text-muted-foreground">
@@ -430,34 +434,38 @@ function TodayColumn({ summary }: { summary: EnergySummary }) {
 }
 
 function ShareBar({ day }: { day: DayUnits }) {
-  const parts: { label: string; kwh: number; className?: string; style?: CSSProperties }[] = [
-    { label: "Solar", kwh: day.solar_kwh, className: "bg-amber-500" },
-    { label: "Battery", kwh: day.battery_kwh, className: "bg-sky-500" },
-    { label: "Grid", kwh: day.grid_kwh, style: { background: GRID_FILL["1"] } },
+  const grid = [
+    { label: "Grid · Meter 1", kwh: day.meter1_kwh, style: { background: GRID_FILL["1"] } },
+    { label: "Grid · Meter 2", kwh: day.meter2_kwh, style: { background: GRID_FILL["2"] } },
+    { label: "Grid · not assigned", kwh: day.unassigned_kwh, style: { background: GRID_FILL.none } },
+  ].filter((part) => part.kwh >= 0.005);
+  const parts: { label: string; kwh: number; style?: CSSProperties }[] = [
+    ...(grid.length > 0 ? grid : [{ label: "Grid", kwh: 0, style: { background: GRID_FILL.none } }]),
+    { label: "Solar", kwh: day.solar_kwh },
+    { label: "Battery", kwh: day.battery_kwh },
   ];
   const sum = parts.reduce((total, part) => total + part.kwh, 0);
   const total = sum > 0 ? sum : 1;
   return (
     <>
       <div className="mt-2 flex h-2 overflow-hidden rounded-full bg-muted" aria-hidden>
-        {parts.map((part) =>
-          part.kwh > 0 ? (
-            <div key={part.label} className={part.className} style={{ ...part.style, width: `${(part.kwh / total) * 100}%` }} />
-          ) : null,
-        )}
+        {grid.map((part) => (
+          <div key={part.label} style={{ ...part.style, width: `${(part.kwh / total) * 100}%` }} />
+        ))}
       </div>
       <dl className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs tabular-nums text-muted-foreground">
         {parts.map((part) => (
           <div key={part.label} className="inline-flex items-center gap-1.5">
-            <span className={cn("size-2 rounded-full", part.className)} style={part.style} aria-hidden />
+            <span className={cn("size-2.5 rounded-xs", !part.style && "bg-muted")} style={part.style} aria-hidden />
             <dt>{part.label}</dt>
-            <dd className="font-medium text-foreground">{fmtNumber(part.kwh, 2)} kWh</dd>
+            <dd className="font-medium text-foreground">{part.kwh.toFixed(2)} kWh</dd>
           </div>
         ))}
       </dl>
     </>
   );
 }
+
 
 function MeterSwitcher({
   active,
@@ -507,25 +515,29 @@ function MeterSwitcher({
     <div className="flex flex-col items-start gap-1 sm:items-end">
       <div className="flex items-center gap-2 text-xs">
         <span className="text-muted-foreground">Grid from</span>
-        <div role="radiogroup" aria-label="Meter the changeover switch is on" className="inline-flex rounded-md border border-border p-0.5">
+        <ToggleGroup
+          aria-label="Meter the changeover switch is on"
+          value={active != null ? [String(active)] : []}
+          onValueChange={(next) => {
+            const meter = Number(next[0]);
+            if (meter === 1 || meter === 2) begin(meter);
+          }}
+          disabled={pending}
+          spacing={0.5}
+          className="rounded-md border border-border p-0.5"
+        >
           {([1, 2] as const).map((meter) => (
-            <button
+            <ToggleGroupItem
               key={meter}
-              type="button"
-              role="radio"
-              aria-checked={active === meter}
-              disabled={pending}
-              onClick={() => begin(meter)}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded px-2.5 py-1 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                active === meter ? "bg-foreground text-background" : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
+              value={String(meter)}
+              size="sm"
+              className="h-auto gap-1.5 rounded px-2.5 py-1 font-medium"
             >
               <span className="size-2 rounded-full" style={{ background: GRID_FILL[String(meter) as "1" | "2"] }} aria-hidden />
               Meter {meter}
-            </button>
+            </ToggleGroupItem>
           ))}
-        </div>
+        </ToggleGroup>
       </div>
       {target == null ? <p className="text-micro tabular-nums text-muted-foreground">{sinceText}</p> : null}
       {target != null ? (
@@ -576,6 +588,7 @@ function BillBlock({ title, period, active, previous = false }: { title: string;
   ];
   const shown = rows.filter((row) => row.kwh >= 0.005 || (row.key !== "none" && active != null && row.key === String(active)));
   const missing = period.days_total - period.days_with_data;
+  const single = shown.length <= 1;
   return (
     <div>
       <p className="flex flex-wrap items-baseline justify-between gap-x-2 text-micro font-medium uppercase tracking-wide text-muted-foreground">
@@ -602,7 +615,7 @@ function BillBlock({ title, period, active, previous = false }: { title: string;
           ))}
         </ul>
       )}
-      <PeriodTotal period={period} previous={previous} missing={missing} />
+      <PeriodTotal period={period} previous={previous} missing={missing} single={single} />
       <LogGap period={period} />
     </div>
   );
@@ -612,19 +625,26 @@ function LogGap({ period }: { period: BillPeriod }) {
   const gap = period.elapsed_hours - period.log_hours;
   if (gap < 1) return null;
   return (
-    <p className="mt-1 text-xs tabular-nums text-amber-700 dark:text-amber-400">
-      The inverter's log is missing {fmtNumber(gap, 1)} h of this period, so the real figure is a little higher.
+    <p
+      className="mt-1.5 inline-flex items-center gap-1.5 text-xs tabular-nums text-muted-foreground"
+      title="Units used during those hours aren't counted, so the real figure is a little higher."
+    >
+      <TriangleAlert className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+      {fmtNumber(gap, 1)} h missing from the inverter's log · real figure a little higher
     </p>
   );
 }
 
-function PeriodTotal({ period, previous, missing }: { period: BillPeriod; previous: boolean; missing: number }) {
+function PeriodTotal({ period, previous, missing, single }: { period: BillPeriod; previous: boolean; missing: number; single: boolean }) {
   const total: GridSplit = period.so_far;
+  const noData = missing > 0 ? `${missing} ${missing === 1 ? "day has" : "days have"} no data.` : "";
+  if (single) {
+    return noData ? <p className="mt-2 text-xs tabular-nums text-muted-foreground">{noData}</p> : null;
+  }
   if (previous) {
     return (
       <p className="mt-2 text-xs tabular-nums text-muted-foreground">
-        {unitsLabel(total.grid_kwh)} in all — compare with your bills.
-        {missing > 0 ? ` ${missing} ${missing === 1 ? "day has" : "days have"} no data.` : ""}
+        {unitsLabel(total.grid_kwh)} in all — compare with your bills.{noData ? ` ${noData}` : ""}
       </p>
     );
   }
@@ -636,54 +656,156 @@ function PeriodTotal({ period, previous, missing }: { period: BillPeriod; previo
   );
 }
 
-function RecentColumn({ days }: { days: DayUnits[] }) {
-  const max = Math.max(0.5, ...days.map((day) => day.grid_kwh));
+function chartStep(peak: number): number {
+  if (peak <= 1) return 0.5;
+  if (peak <= 3) return 1;
+  if (peak <= 6) return 2;
+  return 5;
+}
+
+interface ChartRow {
+  date: string;
+  day: DayUnits;
+  partial: boolean;
+  month: string | null;
+  m1: number;
+  m2: number;
+  none: number;
+}
+
+const SEGMENTS: { key: "none" | "m2" | "m1"; fill: "1" | "2" | "none"; label: string }[] = [
+  { key: "none", fill: "none", label: "Not assigned" },
+  { key: "m2", fill: "2", label: "Meter 2" },
+  { key: "m1", fill: "1", label: "Meter 1" },
+];
+
+function DayTick({ x, y, payload, rows, todayKey }: { x?: number | string; y?: number | string; payload?: { value: string }; rows: ChartRow[]; todayKey?: string }) {
+  const row = rows.find((item) => item.date === payload?.value);
+  if (!row || x == null || y == null) return null;
+  const today = row.date === todayKey;
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <text dy={10} textAnchor="middle" fontSize={CHART_FONT} fill={today ? "var(--foreground)" : VIZ.ink} fontWeight={today ? 600 : 400}>
+        {parseDay(row.date).getDate()}
+      </text>
+      {row.month ? (
+        <text dy={22} textAnchor="middle" fontSize={CHART_FONT - 1} fill={VIZ.ink}>
+          {row.month}
+        </text>
+      ) : null}
+    </g>
+  );
+}
+
+function RecentColumn({ days, billStart }: { days: DayUnits[]; billStart: string | null }) {
+  const peak = Math.max(0.5, ...days.map((day) => day.grid_kwh));
+  const step = chartStep(peak);
+  const top = Math.ceil(peak / step) * step;
+  const ticks = Array.from({ length: Math.round(top / step) + 1 }, (_, index) => index * step);
   const todayKey = days[days.length - 1]?.date;
+  const finished = days.filter((day) => day.house_kwh > 0 && day.date !== todayKey);
+  const average = finished.length > 0 ? finished.reduce((total, day) => total + day.grid_kwh, 0) / finished.length : null;
+  const billDay = billStart?.slice(0, 10) ?? null;
+  const billInView = billDay != null && days.some((day) => day.date === billDay);
+  const rows: ChartRow[] = days.map((day, index) => {
+    const date = parseDay(day.date);
+    const hasData = day.house_kwh > 0;
+    return {
+      date: day.date,
+      day,
+      partial: day.date === todayKey,
+      month: index === 0 || date.getDate() === 1 ? date.toLocaleDateString("en-GB", { month: "short" }) : null,
+      m1: hasData ? day.meter1_kwh : 0,
+      m2: hasData ? day.meter2_kwh : 0,
+      none: hasData ? day.unassigned_kwh : 0,
+    };
+  });
+
   return (
     <div className="border-t px-4 sm:px-5 py-4 lg:border-t-0">
       <p className="flex items-baseline justify-between text-micro font-medium uppercase tracking-wide text-muted-foreground">
         <span>Last 14 days</span>
-        <span className="normal-case tracking-normal tabular-nums">tallest {unitsLabel(max)}</span>
+        {average != null ? <span className="normal-case tracking-normal tabular-nums">avg {fmtUnits(average)} a day</span> : null}
       </p>
-      <div className="mt-3 flex h-32 items-stretch gap-1">
-        {days.map((day) => {
-          const hasData = day.house_kwh > 0;
-          const label = hasData
-            ? `${parseDay(day.date).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })}: ${unitsLabel(day.grid_kwh)}`
-            : `${dayMonth(day.date)}: no data`;
-          const segments: { key: "1" | "2" | "none"; kwh: number }[] = [
-            { key: "none", kwh: day.unassigned_kwh },
-            { key: "2", kwh: day.meter2_kwh },
-            { key: "1", kwh: day.meter1_kwh },
-          ];
-          return (
-            <div key={day.date} role="img" aria-label={label} title={label} className="flex min-w-0 flex-1 flex-col items-center gap-1">
-              <div className="flex w-full flex-1 flex-col justify-end">
-                {hasData ? (
-                  segments.map((segment) =>
-                    segment.kwh > 0 ? (
-                      <div
-                        key={segment.key}
-                        className="w-full first:rounded-t-[2px]"
-                        style={{ height: `${(segment.kwh / max) * 100}%`, background: GRID_FILL[segment.key] }}
-                      />
-                    ) : null,
-                  )
-                ) : (
-                  <div className="w-full border-t border-dashed border-muted-foreground/40" />
-                )}
-              </div>
-              <span className={cn("text-micro tabular-nums text-muted-foreground", day.date === todayKey && "font-semibold text-foreground")}>
-                {parseDay(day.date).getDate()}
-              </span>
-            </div>
-          );
-        })}
+      <div className="mt-3 h-48" role="img" aria-label={`Units taken from the grid each day for the last 14 days${average != null ? `, averaging ${unitsLabel(average)} a day` : ""}`}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={rows} margin={{ top: 4, right: 0, bottom: 0, left: 0 }} barCategoryGap={3}>
+            <CartesianGrid vertical={false} stroke={VIZ.grid} />
+            <XAxis
+              dataKey="date"
+              interval={0}
+              height={40}
+              tickLine={false}
+              axisLine={false}
+              tick={(props) => <DayTick {...props} rows={rows} todayKey={todayKey} />}
+            />
+            <YAxis
+              orientation="right"
+              domain={[0, top]}
+              ticks={ticks}
+              tickFormatter={(value: number) => fmtNumber(value, step < 1 ? 1 : 0)}
+              tick={{ fontSize: CHART_FONT, fill: VIZ.ink }}
+              tickLine={false}
+              axisLine={false}
+              width={24}
+            />
+            {billInView ? <ReferenceLine x={billDay} position="start" stroke={VIZ.contextStrong} strokeDasharray="3 3" /> : null}
+            <Tooltip
+              cursor={{ fill: VIZ.grid }}
+              content={({ active, payload }) => {
+                const row = payload?.[0]?.payload as ChartRow | undefined;
+                if (!active || !row) return null;
+                const { day } = row;
+                const date = parseDay(day.date).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+                const parts = SEGMENTS.filter((segment) => row[segment.key] >= 0.005).reverse();
+                return (
+                  <ChartTooltipBox>
+                    <p className="font-medium">
+                      {date}
+                      {row.partial ? " · so far" : ""}
+                      {row.date === billDay ? " · new bill" : ""}
+                    </p>
+                    {day.house_kwh <= 0 ? (
+                      <p className="text-muted-foreground">No data</p>
+                    ) : (
+                      <>
+                        <p className="text-muted-foreground">
+                          From the grid <span className="text-foreground">{unitsLabel(day.grid_kwh)}</span>
+                        </p>
+                        {parts.length > 1
+                          ? parts.map((segment) => (
+                              <p key={segment.key} className="flex items-center gap-1.5 text-muted-foreground">
+                                <span className="size-2 rounded-xs" style={{ background: GRID_FILL[segment.fill] }} aria-hidden />
+                                {segment.label} <span className="text-foreground">{fmtUnits(row[segment.key])}</span>
+                              </p>
+                            ))
+                          : null}
+                      </>
+                    )}
+                  </ChartTooltipBox>
+                );
+              }}
+            />
+            {SEGMENTS.map((segment) => (
+              <Bar key={segment.key} dataKey={segment.key} stackId="grid" fill={GRID_FILL[segment.fill]} isAnimationActive={false}>
+                {rows.map((row) => (
+                  <Cell key={row.date} fillOpacity={row.partial ? 0.55 : 1} />
+                ))}
+              </Bar>
+            ))}
+          </BarChart>
+        </ResponsiveContainer>
       </div>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-micro text-muted-foreground">
         <Legend fill={GRID_FILL["1"]} label="Meter 1" />
         <Legend fill={GRID_FILL["2"]} label="Meter 2" />
         <Legend fill={GRID_FILL.none} label="Not assigned" />
+        {billInView ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 border-l border-dashed border-muted-foreground/60" aria-hidden />
+            New bill
+          </span>
+        ) : null}
       </div>
     </div>
   );
@@ -692,7 +814,7 @@ function RecentColumn({ days }: { days: DayUnits[] }) {
 function Legend({ fill, label }: { fill: string; label: string }) {
   return (
     <span className="inline-flex items-center gap-1.5">
-      <span className="size-2 rounded-[2px]" style={{ background: fill }} aria-hidden />
+      <span className="size-2 rounded-xs" style={{ background: fill }} aria-hidden />
       {label}
     </span>
   );

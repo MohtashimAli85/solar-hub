@@ -70,7 +70,7 @@ export function describeEta(
   switch (eta.kind) {
     case "discharging":
       return {
-        headline: `${EMPTY_TARGET_PERCENT}% in ${eta.minutes >= 24 * 60 ? "over a day" : `~${fmtDuration(eta.minutes)}`}`,
+        headline: `Down to ${EMPTY_TARGET_PERCENT}% in ${eta.minutes >= 24 * 60 ? "over a day" : `~${fmtDuration(eta.minutes)}`}`,
         detail: eta.minutes >= 24 * 60 ? "at the current draw" : `${clockText(eta.at, now)} · at the current draw`,
       };
     case "charging":

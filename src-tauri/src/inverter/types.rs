@@ -180,11 +180,13 @@ impl InverterSnapshot {
         if !raw.is_finite() {
             return None;
         }
-        Some(if unit.eq_ignore_ascii_case("kW") {
-            raw * 1000.0
+        if unit.eq_ignore_ascii_case("kW") {
+            Some(raw * 1000.0)
+        } else if unit.is_empty() || unit.eq_ignore_ascii_case("W") {
+            Some(raw)
         } else {
-            raw
-        })
+            None
+        }
     }
 
     /// Current PV output in watts, from the energy-flow payload first.
@@ -315,6 +317,12 @@ mod tests {
             ..snapshot.clone()
         };
         assert_eq!(kilowatt.pv_watts(), Some(1500.0));
+
+        let grid_voltage = InverterSnapshot {
+            grid_flow: Some(flow(230.1, "V")),
+            ..snapshot.clone()
+        };
+        assert_eq!(grid_voltage.grid_status(None, None).power_w, None);
     }
 
     #[test]

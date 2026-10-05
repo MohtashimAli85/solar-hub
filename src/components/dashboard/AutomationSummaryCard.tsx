@@ -1,4 +1,4 @@
-import { automationPhaseLabel, PHASE_VARIANTS, relativeUntil } from "@/components/automation/shared";
+import { automationPhaseLabel, clock, PHASE_VARIANTS, relativeUntil } from "@/components/automation/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { AutomationStatus } from "@/lib/types";
@@ -21,11 +21,16 @@ export function AutomationSummaryCard({ status, onOpen }: { status: AutomationSt
   }
   const next = relativeUntil(status.next_check_at);
   const plan = planLine(status);
+  const pausedAt = status.last_event ? clock(status.last_event.timestamp) : null;
   const text = !status.enabled
     ? "Off. Turn it on to let the agent plan tonight's battery use."
     : status.phase === "blocked"
       ? status.blocked_reason ?? "Needs setup."
-      : status.ai_reason ?? "Waiting for the first check…";
+      : status.phase === "paused"
+        ? status.last_event
+          ? `${status.last_event.message} (${pausedAt}).`
+          : "Paused until the next window."
+        : status.ai_reason ?? "Waiting for the first check…";
 
   return (
     <section className="flex h-full flex-col gap-3 rounded-xl border border-border bg-card p-4 sm:p-5">
