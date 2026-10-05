@@ -105,7 +105,7 @@ ${lines(input.typical_hourly_load, (h) => `  ${h.hour} ${n(h.load_w, " W")} (≈
 
 Instead of an all-or-nothing call, you set a RESERVE: the house runs on battery until the battery reaches reserve_soc, then the controller automatically switches to "solar" (grid) for the rest of the night. It is completely fine if the battery would not last until sunrise — that is what the reserve is for.
 
-Tonight the hard floor is ${input.floor_soc}%. Size the load-shedding backup from the recent outage history below (frequent or long outages → keep more). If ${input.coming_day} looks as sunny as recent days on which the battery filled, a lower reserve is fine; if it looks cloudy or rainy, keep more so the battery isn't left low for days.
+Tonight the hard floor is ${input.floor_soc}%. Even after the switch to "solar", the inverter itself keeps drawing about ${n(input.standby_drain_a, " A", 1)} from the battery until the sun is up, so right now the lowest reserve that still keeps the battery at ${input.floor_soc}% by morning is ${input.min_reserve_soc}% — the controller never stops lower than that. Size the load-shedding backup from the recent outage history below (frequent or long outages → keep more). If ${input.coming_day} looks as sunny as recent days on which the battery filled, a lower reserve is fine; if it looks cloudy or rainy, keep more so the battery isn't left low for days.
 
 ${onBattery}
 
@@ -135,7 +135,7 @@ ${smartLoadSection(input.smart_load)}
 
 Decide:
 - mode: "sbg" to run on battery now (until reserve_soc), or "solar" to stay in Solar mode for now, with the grid powering the house (e.g. SOC is already at or near the reserve you'd want, or it's better to wait).
-- reserve_soc: the SOC at which to switch back to "solar" mode, between ${input.floor_soc} and 95.
+- reserve_soc: the SOC at which to switch back to "solar" mode, between ${input.min_reserve_soc} and 95.
 - recheck_minutes: when to look again (15–120). Check sooner when the load is changing (family still awake, no history yet) or the battery is close to the reserve; later when things are steady.
 - smart_load_on_at: "HH:MM" (24-hour) for when smart load should be enabled tonight (heavy loads cut).
 - reason: one or two short sentences naming the factors that drove the reserve (routine, outages, ${input.coming_day}'s sun, season). Refer to that day as "${input.coming_day}". Speak plainly to the homeowner.`;

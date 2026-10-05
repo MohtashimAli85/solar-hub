@@ -179,6 +179,10 @@ pub struct NightInput {
     pub rated_capacity_ah: f64,
     pub battery_v: Option<f64>,
     pub floor_soc: f64,
+    /// The floor plus what Solar mode's standby draw takes until sunrise;
+    /// the controller never stops on battery below it.
+    pub min_reserve_soc: f64,
+    pub standby_drain_a: f64,
     pub load_w: Option<f64>,
     pub pv_w: Option<f64>,
     pub discharge_a: f64,

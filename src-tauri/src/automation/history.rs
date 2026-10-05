@@ -20,6 +20,9 @@ const OUTAGE_GAP_MINUTES: i64 = 60;
 /// shows at least this much discharge.
 const ON_BATTERY_A: f64 = 1.0;
 const SLEEP_HOURS: std::ops::Range<u32> = 0..6;
+const STANDBY_DARK_PV_W: f64 = 50.0;
+const STANDBY_MAX_A: f64 = 3.0;
+const STANDBY_MIN_SAMPLES: usize = 6;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sample {
@@ -429,6 +432,23 @@ pub fn outages(samples: &[Sample], since: NaiveDateTime) -> Vec<Outage> {
     events
 }
 
+/// What the inverter itself draws from the battery in Solar mode with the
+/// grid on and no sun: the battery keeps slowly draining after a night switch.
+pub fn standby_drain_a(samples: &[Sample], since: NaiveDateTime) -> Option<f64> {
+    let mut draws: Vec<f64> = samples
+        .iter()
+        .filter(|s| s.at >= since && s.grid_on == Some(true) && s.mode.as_deref() == Some("Solar"))
+        .filter(|s| s.pv_w.is_some_and(|pv| pv < STANDBY_DARK_PV_W))
+        .filter_map(|s| s.battery_a)
+        .filter(|a| *a < 0.0 && *a > -STANDBY_MAX_A)
+        .map(f64::abs)
+        .collect();
+    if draws.len() < STANDBY_MIN_SAMPLES {
+        return None;
+    }
+    median(&mut draws)
+}
+
 fn minutes_between(start: NaiveDateTime, end: NaiveDateTime) -> f64 {
     (end - start).num_seconds() as f64 / 60.0
 }
@@ -659,6 +679,18 @@ mod tests {
         assert_eq!((events[0].start, events[0].minutes), (at(20, 22, 15), 60.0));
         assert_eq!(events[1].minutes, 0.0, "gap over an hour closes at the last off sample");
         assert!(events[2].ongoing);
+    }
+
+    #[test]
+    fn standby_drain_only_counts_solar_mode_with_the_grid_on_in_the_dark() {
+        let standby = |minute: u32, amps: f64| Sample { battery_a: Some(amps), ..sample(at(20, 2, minute), 200.0, 19.0, Some(true)) };
+        let mut samples: Vec<Sample> = [-0.95, -0.9, -0.92, -0.84, -0.98, -0.91].iter().enumerate().map(|(i, a)| standby(i as u32, *a)).collect();
+        samples.push(sample(at(20, 1, 0), 200.0, 24.0, Some(false)));
+        samples.push(Sample { mode: Some("SBG".into()), ..standby(30, -10.0) });
+        samples.push(Sample { pv_w: Some(800.0), ..standby(40, -0.5) });
+
+        assert!((standby_drain_a(&samples, at(20, 0, 0)).unwrap() - 0.915).abs() < 1e-9);
+        assert_eq!(standby_drain_a(&samples[..5], at(20, 0, 0)), None, "too few samples to trust");
     }
 
     #[test]

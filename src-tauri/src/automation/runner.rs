@@ -13,7 +13,7 @@ use crate::automation::guardrails;
 use crate::automation::history::{self, DecisionRow, NightProfile, Outage, Sample};
 use crate::automation::insights::{AutomationInsights, RecordsInfo, RoutineInsight, SmartLoadInsight};
 use crate::automation::telemetry::{
-    estimate_discharge_a, first_at_or_below, project_day, soc_per_hour_at, soc_trajectory, DayProjection,
+    estimate_discharge_a, first_at_or_below, project_day, soc_per_ah, soc_per_hour_at, soc_trajectory, DayProjection,
     DayProjectionInput, EngineReading, SocPoint,
 };
 use crate::automation::weather::{self, Forecast, SummaryInput, WeatherSummary};
@@ -34,6 +34,9 @@ const NEAR_RESERVE_TICK: Duration = Duration::from_secs(300);
 const NEAR_RESERVE_MARGIN: f64 = 5.0;
 /// This close to the floor the battery can't run the house, so the AI isn't asked.
 const NEAR_FLOOR_MARGIN: f64 = 3.0;
+/// In Solar mode the inverter still draws about this much from the battery
+/// until enough samples say otherwise; the reserve covers it until sunrise.
+const STANDBY_DRAIN_FALLBACK_A: f64 = 1.0;
 const MAX_AI_FAILURES: u32 = 3;
 const AI_RETRY_MINUTES: i64 = 15;
 const SAMPLE_EVERY: Duration = Duration::from_secs(290);
@@ -268,6 +271,7 @@ struct Context {
     solar_days: Vec<history::DaySolar>,
     forecast: Option<Forecast>,
     weather: Option<WeatherSummary>,
+    standby_drain_a: f64,
 }
 
 impl Context {
@@ -277,6 +281,8 @@ impl Context {
         let outages = history::outages(&samples, clock.now - chrono::Duration::days(RECENT_DAYS));
         let solar_days = history::daily_solar(&samples, clock.now.date(), RECENT_DAYS + 1);
         let outcomes = history::night_outcomes(&samples, clock.night(), HISTORY_NIGHTS);
+        let standby_drain_a = history::standby_drain_a(&samples, clock.now - chrono::Duration::days(RECENT_DAYS))
+            .unwrap_or(STANDBY_DRAIN_FALLBACK_A);
         let weather = forecast.as_ref().map(|forecast| {
             weather::summarize(
                 forecast,
@@ -301,6 +307,7 @@ impl Context {
             solar_days,
             forecast,
             weather,
+            standby_drain_a,
         }
     }
 }
@@ -909,11 +916,22 @@ struct ClampedPlan {
     model: Option<String>,
 }
 
-fn clamp_night_plan(plan: agent::NightPlan, config: &AutomationConfig) -> ClampedPlan {
+/// The lowest reserve that still keeps the battery at the floor by morning:
+/// after the switch to Solar the inverter keeps drawing its standby current
+/// from the battery until the panels take over.
+fn standby_reserve(ctx: &Context, reading: &EngineReading, config: &AutomationConfig) -> f64 {
+    let end = ctx.clock.next_sunrise() + ctx.clock.morning_buffer;
+    let hours = ((end - ctx.clock.now).num_minutes().max(0) as f64) / 60.0;
+    let rated_ah = if reading.rated_capacity_ah > 0.0 { reading.rated_capacity_ah } else { config.capacity_ah };
+    let drain_pct = ctx.standby_drain_a * soc_per_ah(rated_ah) * hours;
+    (config.min_soc_percent + drain_pct).ceil().min(MAX_RESERVE_SOC)
+}
+
+fn clamp_night_plan(plan: agent::NightPlan, min_reserve: f64) -> ClampedPlan {
     let reserve = if plan.reserve_soc.is_finite() { plan.reserve_soc } else { MAX_RESERVE_SOC };
     ClampedPlan {
         on_battery: plan.mode.eq_ignore_ascii_case("sbg"),
-        reserve_soc: reserve.clamp(config.min_soc_percent, MAX_RESERVE_SOC).round(),
+        reserve_soc: reserve.round().clamp(min_reserve, MAX_RESERVE_SOC),
         recheck_minutes: clamp_recheck(plan.recheck_minutes),
         confidence: plan.confidence,
         reason: plan.reason,
@@ -1196,6 +1214,8 @@ fn build_night_input(
         rated_capacity_ah: reading.rated_capacity_ah,
         battery_v: reading.batt_v,
         floor_soc: config.min_soc_percent,
+        min_reserve_soc: standby_reserve(ctx, reading, config),
+        standby_drain_a: round1(ctx.standby_drain_a),
         load_w: reading.load_w.map(f64::round),
         pv_w: reading.pv_w.map(f64::round),
         discharge_a: (discharge_a * 10.0).round() / 10.0,
@@ -1528,15 +1548,15 @@ async fn night_deciding(
         engine.set_reason("Waiting for a battery SOC reading.").await;
         return normal_interval(config);
     };
-    if soc - config.min_soc_percent < NEAR_FLOOR_MARGIN {
-        engine.set_reason("The battery is at the floor — Solar mode until the sun is up.").await;
+    if soc - standby_reserve(ctx, reading, config) < NEAR_FLOOR_MARGIN {
+        engine.set_reason("The battery only holds what Solar mode's standby draw needs until sunrise — Solar mode until the sun is up.").await;
         return normal_interval(config);
     }
 
     let discharge = estimate_discharge_a(reading.load_w, reading.pv_w, reading.batt_v).unwrap_or(reading.discharge_a);
     let input = build_night_input(ctx, reading, &memory.night, config, soc, discharge, false);
     let plan = match engine.agent.run_night(input).await {
-        Ok(plan) => clamp_night_plan(plan, config),
+        Ok(plan) => clamp_night_plan(plan, standby_reserve(ctx, reading, config)),
         Err(error) => {
             engine.ai_failure(&mut memory.night.ai_failure_notified, error, "Solar").await;
             return normal_interval(config);
@@ -1649,7 +1669,8 @@ async fn night_verifying(
     match engine.agent.run_night(input).await {
         Ok(plan) => {
             remember_smart_load_time(&mut memory.night, &ctx.clock, plan.smart_load_on_at.as_deref());
-            apply_on_battery_plan(engine, memory, clamp_night_plan(plan, config), soc, now, true).await
+            let plan = clamp_night_plan(plan, standby_reserve(ctx, reading, config));
+            apply_on_battery_plan(engine, memory, plan, soc, now, true).await
         }
         Err(error) => on_battery_ai_failure(engine, memory, error, now).await,
     }
@@ -1665,13 +1686,22 @@ async fn night_on_battery(
     let config = engine.config;
     let now = ctx.clock.now;
     engine.set_phase(Phase::NightOnBattery).await;
-    let reserve = memory.night.plan.as_ref().map(|plan| plan.reserve_soc).unwrap_or(config.min_soc_percent);
+    let planned = memory.night.plan.as_ref().map(|plan| plan.reserve_soc).unwrap_or(config.min_soc_percent);
+    let reserve = planned.max(standby_reserve(ctx, reading, config));
     let Some(soc) = soc else {
         return normal_interval(config);
     };
 
     if soc <= reserve {
-        let reason = format!("Reached the {} reserve — keeping the rest as backup for tonight.", fmt_pct(reserve));
+        let reason = if soc <= planned {
+            format!("Reached the {} reserve — keeping the rest as backup for tonight.", fmt_pct(planned))
+        } else {
+            format!(
+                "Stopped at {} — Solar mode still draws a little from the battery, and that's what it needs to stay above {} until sunrise.",
+                fmt_pct(reserve),
+                fmt_pct(config.min_soc_percent)
+            )
+        };
         if !revert_to_solar(engine, &mut memory.night, &format!("switch to Solar — {}", reason.to_lowercase())).await {
             return normal_interval(config);
         }
@@ -1693,7 +1723,8 @@ async fn night_on_battery(
         return match engine.agent.run_night(input).await {
             Ok(plan) => {
                 remember_smart_load_time(&mut memory.night, &ctx.clock, plan.smart_load_on_at.as_deref());
-                apply_on_battery_plan(engine, memory, clamp_night_plan(plan, config), soc, now, false).await
+                let plan = clamp_night_plan(plan, standby_reserve(ctx, reading, config));
+                apply_on_battery_plan(engine, memory, plan, soc, now, false).await
             }
             Err(error) => on_battery_ai_failure(engine, memory, error, now).await,
         };
@@ -2618,7 +2649,7 @@ mod tests {
     #[tokio::test]
     async fn reserve_is_clamped_to_the_floor() {
         let config = AutomationConfig::default();
-        let clamped = clamp_night_plan(plan("sbg", 5.0, 500.0).unwrap(), &config);
+        let clamped = clamp_night_plan(plan("sbg", 5.0, 500.0).unwrap(), config.min_soc_percent);
         assert_eq!(clamped.reserve_soc, config.min_soc_percent);
         assert_eq!(clamped.recheck_minutes, 120);
     }
@@ -2671,6 +2702,34 @@ mod tests {
         assert_eq!(memory.night.effective_mode, Some(SOLAR_MODE));
         assert_eq!(h.state.status().await.phase, Phase::NightReserve);
         assert!(h.notifier.sent.lock().unwrap()[0].contains("reserve"));
+    }
+
+    #[tokio::test]
+    async fn battery_stops_early_enough_for_the_standby_drain_to_end_at_the_floor() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let mut memory = night_memory();
+        memory.night.phase = NightPhase::OnBattery;
+        memory.night.effective_mode = Some(SBG_MODE);
+        memory.night.sim_soc = Some(23.0);
+        memory.night.sim_updated_at = Some(at(27, 3, 0));
+        memory.night.plan = Some(ActivePlan { reserve_soc: 20.0, reason: "test".into() });
+        memory.night.next_check_at = Some(at(27, 4, 0));
+        night_tick(&h.engine(&agent), &mut memory, &reading(80.0, SBG_MODE, 300.0), &ctx(at(27, 3, 0))).await;
+
+        assert_eq!(memory.night.phase, NightPhase::ReserveKept, "3 h to sunrise at 1 A on 100 Ah needs 23%");
+        assert_eq!(memory.night.effective_mode, Some(SOLAR_MODE));
+        assert_eq!(h.decisions()[0].reserve_soc, Some(23.0));
+    }
+
+    #[tokio::test]
+    async fn agent_reserve_is_raised_to_cover_the_standby_drain() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![plan("sbg", 20.0, 60.0)]);
+        let mut memory = night_memory();
+        night_tick(&h.engine(&agent), &mut memory, &reading(70.0, SOLAR_MODE, 600.0), &ctx(at(27, 0, 0))).await;
+
+        assert_eq!(memory.night.plan.as_ref().unwrap().reserve_soc, 26.0);
     }
 
     #[tokio::test]

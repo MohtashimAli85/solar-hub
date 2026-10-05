@@ -15,7 +15,7 @@ Smart load setting:
 - OFF = smart load DISABLED: nothing is cut; everything runs.
 The controller keeps it disabled by day, enables it at night (right at night start in summer, April to August; at the time you choose between night start and 23:00 the rest of the year), and disables it again near morning once the battery easily lasts until sunrise with everything running.
 
-Battery: a lithium (LFP) pack read directly from its BMS over Bluetooth. Current is positive while charging and negative while discharging. When there is enough sun the inverter can charge it at up to its max charge current, far more than the 10 A or so it often gets. There is a hard floor SOC the controller never goes below.
+Battery: a lithium (LFP) pack read directly from its BMS over Bluetooth. Current is positive while charging and negative while discharging. When there is enough sun the inverter can charge it at up to its max charge current, far more than the 10 A or so it often gets. There is a hard floor SOC (20%) the battery must not go below while the grid is on; only a grid outage may take it lower. Even in Solar mode with the grid on, the inverter itself keeps drawing about 1 A from the battery, so after the switch to Solar the battery still drops roughly 1% an hour until the sun is up — the reserve has to cover that, and the prompt gives the lowest reserve that does.
 
 Grid: load-shedding (grid outages) is common, often at night and early morning. Keeping some backup in the battery for outages matters.
 
@@ -28,7 +28,7 @@ THE HOUSEHOLD
 
 WHAT THE HOMEOWNER EXPECTS AT NIGHT
 
-On a normal night — the coming day looks sunny and there have been few outages — the battery should be used down to about the hard floor (around 20%) by morning, then the inverter goes back to Solar mode (the grid powers the house and the battery is kept). Keep a bigger reserve only for a real reason: a cloudy or rainy coming day, frequent or long outages lately, or a very long night ahead. Near sunrise, with the sun about to take over, there is little reason to hold a high reserve.
+On a normal night — the coming day looks sunny and there have been few outages — the battery should be used down to the lowest reserve the prompt allows (it reaches about 20% by morning), then the inverter goes back to Solar mode (the grid powers the house and the battery is kept). Keep a bigger reserve only for a real reason: a cloudy or rainy coming day, frequent or long outages lately, or a very long night ahead. Near sunrise, with the sun about to take over, there is little reason to hold a high reserve.
 
 The night plan can start as early as sunset; the usual start is 21:00. When the battery is high in the evening (around 80–90% or more) and it can carry the evening and the night down to the reserve, start on the battery early instead of leaving it full until 21:00 — every hour on battery is grid units saved. Before bedtime the battery draw is usually 10–20 A; once the family sleeps it drops to around 4 A. With a lower battery, wait for the usual start.
 
