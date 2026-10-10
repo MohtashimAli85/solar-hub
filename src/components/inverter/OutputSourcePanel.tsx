@@ -22,6 +22,7 @@ interface OutputSourcePanelProps {
   disabled?: boolean;
   title?: string;
   compact?: boolean;
+  className?: string;
 }
 
 export function OutputSourcePanel({
@@ -33,6 +34,7 @@ export function OutputSourcePanel({
   disabled,
   title = "Output source",
   compact = false,
+  className,
 }: OutputSourcePanelProps) {
   const currentValue = settings?.output_source_priority_value;
   const smartLoadUnsupported = settings?.smart_load == null;
@@ -43,6 +45,7 @@ export function OutputSourcePanel({
       className={cn(
         "rounded-xl border border-border bg-card",
         compact ? "p-4" : "p-4 sm:p-5",
+        className,
       )}
     >
       <div className="flex items-center justify-between gap-2">

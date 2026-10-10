@@ -42,6 +42,7 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
             onSetSmartLoad={(enabled) => settingsHook.setSmartLoad.mutate(enabled)}
             onRefresh={settingsHook.refresh}
             refreshing={settingsHook.isFetching}
+            className="h-full"
           />
         </div>
         <div className="lg:col-span-2">

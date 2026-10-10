@@ -1,5 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Loader2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { useTheme } from "@/hooks/useTheme";
 import { BottomNav, MobileHeader, NavRail, Sidebar, type Tab } from "@/components/layout/AppNav";
 import { PairScreen } from "@/components/remote/PairScreen";
@@ -24,6 +26,7 @@ const queryClient = new QueryClient({
 function Shell() {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [paired, setPaired] = useState(() => isDesktop || hasPhoneToken());
+  const [refreshing, setRefreshing] = useState(false);
   const { theme, toggleTheme } = useTheme();
 
   useEffect(() => {
@@ -40,6 +43,23 @@ function Shell() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!paired) return;
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      setRefreshing(true);
+      void queryClient
+        .refetchQueries({ type: "active" }, { cancelRefetch: false })
+        .finally(() => setRefreshing(false));
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [paired]);
+
   if (!paired) {
     return (
       <PairScreen
@@ -53,6 +73,15 @@ function Shell() {
 
   return (
     <div className="flex h-dvh">
+      {refreshing ? (
+        <Badge
+          variant="secondary"
+          role="status"
+          className="pointer-events-none fixed left-1/2 top-[max(0.75rem,env(safe-area-inset-top))] z-50 -translate-x-1/2 shadow-sm"
+        >
+          <Loader2 className="size-3 animate-spin" /> Refreshing…
+        </Badge>
+      ) : null}
       <Sidebar tab={tab} onSelect={setTab} theme={theme} onToggleTheme={toggleTheme} />
       <NavRail tab={tab} onSelect={setTab} theme={theme} onToggleTheme={toggleTheme} />
 
