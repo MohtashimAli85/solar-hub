@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use chrono::{Datelike, Months, NaiveDate, NaiveDateTime};
 
-use super::units::{DayUnits, GridSplit, MeterAssignment, MeterSwitch};
+use super::units::{BilledUnits, DayUnits, GridSplit, MeterAssignment, MeterReading, MeterSwitch};
 use crate::automation::history::{num, opt_f64, split_csv_line, HistoryStore};
 
 const KIND: &str = "energy";
@@ -15,6 +15,10 @@ const SWITCH_HEADER: &str = "timestamp,meter";
 const SWITCHES_FILE: &str = "meter-switches.csv";
 const ASSIGNMENT_HEADER: &str = "from,to,meter";
 const ASSIGNMENTS_FILE: &str = "meter-assignments.csv";
+const READING_HEADER: &str = "timestamp,meter1,meter2";
+const READINGS_FILE: &str = "meter-readings.csv";
+const BILLED_HEADER: &str = "bill_start,meter1,meter2";
+const BILLED_FILE: &str = "billed-units.csv";
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
@@ -108,6 +112,74 @@ impl EnergyRecords {
         self.write_assignments(&assignments).map_err(|error| format!("Couldn't save the change: {error}"))
     }
 
+    fn readings_path(&self) -> PathBuf {
+        self.store.root().join(KIND).join(READINGS_FILE)
+    }
+
+    pub fn meter_readings(&self) -> Vec<MeterReading> {
+        let mut readings: Vec<MeterReading> = fs::read_to_string(self.readings_path())
+            .map(|text| text.lines().skip(1).filter_map(parse_reading).collect())
+            .unwrap_or_default();
+        readings.sort_by_key(|reading| reading.at);
+        readings
+    }
+
+    fn write_readings(&self, readings: &[MeterReading]) -> Result<(), String> {
+        let path = self.readings_path();
+        let mut text = format!("{READING_HEADER}\n");
+        for reading in readings {
+            text.push_str(&format!("{},{},{}\n", reading.at.format(TIMESTAMP_FORMAT), reading.meter1, reading.meter2));
+        }
+        path.parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|_| fs::write(path, text))
+            .map_err(|error| format!("Couldn't save the readings: {error}"))
+    }
+
+    /// Saves a reading, replacing one already taken at the same moment.
+    pub fn add_reading(&self, reading: MeterReading) -> Result<(), String> {
+        let mut readings = self.meter_readings();
+        readings.retain(|existing| existing.at != reading.at);
+        readings.push(reading);
+        readings.sort_by_key(|reading| reading.at);
+        self.write_readings(&readings)
+    }
+
+    pub fn remove_reading(&self, at: NaiveDateTime) -> Result<(), String> {
+        let mut readings = self.meter_readings();
+        readings.retain(|reading| reading.at != at);
+        self.write_readings(&readings)
+    }
+
+    fn billed_path(&self) -> PathBuf {
+        self.store.root().join(KIND).join(BILLED_FILE)
+    }
+
+    pub fn billed_units(&self) -> Vec<BilledUnits> {
+        let mut billed: Vec<BilledUnits> = fs::read_to_string(self.billed_path())
+            .map(|text| text.lines().skip(1).filter_map(parse_billed).collect())
+            .unwrap_or_default();
+        billed.sort_by_key(|bill| bill.start);
+        billed
+    }
+
+    /// Saves one bill's units, replacing whatever was saved for the same bill.
+    pub fn set_billed_units(&self, bill: BilledUnits) -> Result<(), String> {
+        let mut billed = self.billed_units();
+        billed.retain(|existing| existing.start.date() != bill.start.date());
+        billed.push(bill);
+        billed.sort_by_key(|bill| bill.start);
+        let mut text = format!("{BILLED_HEADER}\n");
+        for bill in &billed {
+            text.push_str(&format!("{},{},{}\n", bill.start.format(TIMESTAMP_FORMAT), bill.meter1, bill.meter2));
+        }
+        let path = self.billed_path();
+        path.parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|_| fs::write(path, text))
+            .map_err(|error| format!("Couldn't save the bill: {error}"))
+    }
+
     pub fn append_switch(&self, switch: MeterSwitch) -> std::io::Result<()> {
         let path = self.switches_path();
         if let Some(parent) = path.parent() {
@@ -172,6 +244,22 @@ fn parse_assignment(line: &str) -> Option<MeterAssignment> {
     (assignment.from < assignment.to).then_some(assignment)
 }
 
+fn parse_reading(line: &str) -> Option<MeterReading> {
+    let mut fields = line.split(',');
+    let (at, meter1, meter2) = (fields.next()?, fields.next()?, fields.next()?);
+    let value = |text: &str| text.trim().parse::<f64>().ok().filter(|value| value.is_finite() && *value >= 0.0);
+    Some(MeterReading {
+        at: NaiveDateTime::parse_from_str(at.trim(), TIMESTAMP_FORMAT).ok()?,
+        meter1: value(meter1)?,
+        meter2: value(meter2)?,
+    })
+}
+
+fn parse_billed(line: &str) -> Option<BilledUnits> {
+    let reading = parse_reading(line)?;
+    Some(BilledUnits { start: reading.at, meter1: reading.meter1, meter2: reading.meter2 })
+}
+
 fn parse_switch(line: &str) -> Option<MeterSwitch> {
     let (timestamp, meter) = line.split_once(',')?;
     let meter: u8 = meter.trim().parse().ok().filter(|meter| matches!(meter, 1 | 2))?;
@@ -231,6 +319,31 @@ mod tests {
         let mut file = OpenOptions::new().append(true).open(records.switches_path()).unwrap();
         writeln!(file, "2026-09-28 15:00:00,3").unwrap();
         assert_eq!(records.meter_switches(), vec![earlier, later]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn readings_round_trip_and_replace_the_same_moment() {
+        let (records, dir) = records();
+        let at = |date: u32, hour: u32| day(9, date).and_hms_opt(hour, 0, 0).unwrap();
+        records.add_reading(MeterReading { at: at(28, 10), meter1: 1005.42, meter2: 5024.0 }).unwrap();
+        records.add_reading(MeterReading { at: at(21, 12), meter1: 1000.0, meter2: 5000.0 }).unwrap();
+        records.add_reading(MeterReading { at: at(28, 10), meter1: 1005.5, meter2: 5024.0 }).unwrap();
+        let readings = records.meter_readings();
+        assert_eq!(readings.len(), 2);
+        assert_eq!(readings[1].meter1, 1005.5);
+        records.remove_reading(at(21, 12)).unwrap();
+        assert_eq!(records.meter_readings().len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn billed_units_replace_the_same_bill() {
+        let (records, dir) = records();
+        let start = |hour: u32| day(9, 21).and_hms_opt(hour, 57, 0).unwrap();
+        records.set_billed_units(BilledUnits { start: start(11), meter1: 70.0, meter2: 57.0 }).unwrap();
+        records.set_billed_units(BilledUnits { start: start(12), meter1: 78.0, meter2: 57.0 }).unwrap();
+        assert_eq!(records.billed_units(), vec![BilledUnits { start: start(12), meter1: 78.0, meter2: 57.0 }]);
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -3,13 +3,14 @@ use std::time::Duration;
 
 use chrono::{NaiveDate, NaiveTime};
 use chrono_tz::Tz;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use super::units::{compute_day, day_window, unit_points, UnitPoint, HISTORY_KEYS};
-use super::{local_now, Backfill, EnergyState};
+use super::{bill_readings, local_now, Backfill, EnergyState};
 use crate::events;
 use crate::inverter::client::SolarClient;
 use crate::inverter::InverterError;
+use crate::notifications::Notifier;
 
 const REFRESH_EVERY: Duration = Duration::from_secs(10 * 60);
 const BACKFILL_PAUSE: Duration = Duration::from_secs(1);
@@ -34,6 +35,14 @@ pub fn spawn(state: EnergyState, client: SolarClient, app: AppHandle) {
 
 async fn publish(state: &EnergyState, app: &AppHandle) {
     let summary = state.rebuild().await;
+    if let Some(meter) = state.due_switch(&summary).await {
+        if let Some(notifier) = app.try_state::<Notifier>() {
+            notifier.send(
+                &format!("Switch to Meter {meter}"),
+                &format!("Move the changeover to Meter {meter} now to keep both meters even this bill."),
+            );
+        }
+    }
     events::emit(app, events::ENERGY_UPDATED, summary);
 }
 
@@ -77,15 +86,24 @@ async fn refresh(state: &EnergyState, client: &SolarClient, app: &AppHandle) {
     let reading = state.config().await.reading();
     let previous_start = reading.previous_period_start(now);
     let from = previous_start.date();
-    for start in [previous_start, reading.period_start(now)] {
+    let (opening, latest) = bill_readings(&state.records.meter_readings(), reading.period_start(now), previous_start, now);
+    let reading_moments = [opening, latest].into_iter().flatten().map(|reading| reading.at);
+    let mut fetched = false;
+    for start in [previous_start, reading.period_start(now)].into_iter().chain(reading_moments) {
         let day = start.date();
         if day == today || state.has_reading_day(day).await {
             continue;
         }
         match fetch_day(client, tz, day).await {
-            Ok(points) => state.set_reading_day_points(day, points).await,
+            Ok(points) => {
+                state.set_reading_day_points(day, points).await;
+                fetched = true;
+            }
             Err(error) => tracing::warn!("energy: reading day {day} failed: {error}"),
         }
+    }
+    if fetched {
+        publish(state, app).await;
     }
     let settle = NaiveTime::from_hms_opt(0, DAY_SETTLE_MINUTES, 0).unwrap_or(NaiveTime::MIN);
     let finished_back = if now.time() >= settle { 1 } else { 2 };
