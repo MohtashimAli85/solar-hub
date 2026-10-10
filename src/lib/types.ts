@@ -356,6 +356,35 @@ export interface MeterAssignment {
   meter: MeterNumber;
 }
 
+export interface MeterBalance {
+  target_kwh: number;
+  switch_to: MeterNumber | null;
+  switch_at: string | null;
+  meter1_kwh: number;
+  meter2_kwh: number;
+}
+
+export interface MeterReading {
+  at: string;
+  meter1: number;
+  meter2: number;
+}
+
+export interface BilledUnits {
+  start: string;
+  meter1: number;
+  meter2: number;
+}
+
+export interface MetersNow {
+  start: MeterReading;
+  latest: MeterReading;
+  counted_kwh: number;
+  factor: number;
+  meter1_kwh: number;
+  meter2_kwh: number;
+}
+
 export interface EnergySummary {
   configured: boolean;
   today: DayUnits | null;
@@ -364,6 +393,12 @@ export interface EnergySummary {
   recent_days: DayUnits[];
   bill: BillPeriod | null;
   previous_bill: BillPeriod | null;
+  balance: MeterBalance | null;
+  meters: MetersNow | null;
+  readings: MeterReading[];
+  opening_reading: MeterReading | null;
+  latest_reading: MeterReading | null;
+  previous_billed: BilledUnits | null;
   bill_reading_day: number;
   bill_reading_time: string;
   standby_w: number;

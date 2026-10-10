@@ -116,6 +116,20 @@ export const assignMeterRange = (from: string, to: string, meter: MeterNumber) =
 
 export const removeMeterAssignment = (from: string) => invoke<EnergySummary>("remove_meter_assignment", { from });
 
+export const saveMeterReadings = (
+  baseAt: string | null,
+  base1: number,
+  base2: number,
+  at: string | null,
+  meter1: number,
+  meter2: number,
+) => invoke<EnergySummary>("save_meter_readings", { baseAt, base1, base2, at, meter1, meter2 });
+
+export const saveLastBillUnits = (meter1: number, meter2: number) =>
+  invoke<EnergySummary>("save_last_bill_units", { meter1, meter2 });
+
+export const removeMeterReading = (at: string) => invoke<EnergySummary>("remove_meter_reading", { at });
+
 export const setStandbyWatts = (watts: number) => invoke<EnergySummary>("set_standby_watts", { watts });
 
 // — Phone access —

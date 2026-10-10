@@ -1,4 +1,5 @@
 import { listen, type UnlistenFn } from "@/lib/transport";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 import {
   connectBmsDevice,
@@ -10,31 +11,35 @@ import {
 } from "@/lib/tauri";
 import type { BatterySnapshot, ConnectionStatus, DiscoveredDevice } from "@/lib/types";
 
+const SNAPSHOT_KEY = ["battery", "snapshot"] as const;
+const CONNECTION_KEY = ["battery", "connection"] as const;
+
 export function useBatteryDevice() {
-  const [snapshot, setSnapshot] = useState<BatterySnapshot | null>(null);
-  const [connection, setConnection] = useState<ConnectionStatus | null>(null);
+  const queryClient = useQueryClient();
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
   const [scanning, setScanning] = useState(false);
   const [busyDeviceId, setBusyDeviceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
 
-  const refreshSnapshot = useCallback(async () => {
-    setSnapshot(await getBatteryState());
-  }, []);
+  const snapshotQuery = useQuery({
+    queryKey: SNAPSHOT_KEY,
+    queryFn: async () => (await getBatteryState()) ?? null,
+  });
 
-  const refreshConnection = useCallback(async () => {
-    setConnection(await getBatteryConnection());
-  }, []);
+  const connectionQuery = useQuery({
+    queryKey: CONNECTION_KEY,
+    queryFn: getBatteryConnection,
+    refetchInterval: 30_000,
+  });
 
   useEffect(() => {
     let unlistenSnapshot: UnlistenFn | undefined;
     let unlistenConnection: UnlistenFn | undefined;
     Promise.all([
-      listen<BatterySnapshot>("battery://snapshot", (event) => setSnapshot(event.payload)),
+      listen<BatterySnapshot>("battery://snapshot", (event) => queryClient.setQueryData(SNAPSHOT_KEY, event.payload)),
       listen<ConnectionStatus>("battery://connection", (event) => {
-        setConnection(event.payload);
+        queryClient.setQueryData(CONNECTION_KEY, event.payload);
         if (event.payload.reconnecting && !event.payload.connected) {
           setNotice("Reconnecting to BMS…");
         } else {
@@ -49,21 +54,11 @@ export function useBatteryDevice() {
       unlistenSnapshot = a;
       unlistenConnection = b;
     });
-    refreshSnapshot();
-    refreshConnection();
-    Promise.allSettled([refreshSnapshot(), refreshConnection()]).then(() => {
-      setIsLoading(false);
-    });
-
-    const refreshTimer = setInterval(() => {
-      refreshConnection();
-    }, 30_000);
     return () => {
-      clearInterval(refreshTimer);
       unlistenSnapshot?.();
       unlistenConnection?.();
     };
-  }, [refreshSnapshot, refreshConnection]);
+  }, [queryClient]);
 
   const scan = useCallback(async () => {
     setError(null);
@@ -114,20 +109,18 @@ export function useBatteryDevice() {
   }, []);
 
   return {
-    snapshot,
-    connection,
+    snapshot: snapshotQuery.data ?? null,
+    connection: connectionQuery.data ?? null,
     devices,
     scanning,
     busyDeviceId,
     error,
     notice,
     setNotice,
-    isLoading,
+    isLoading: snapshotQuery.isLoading || connectionQuery.isLoading,
     scan,
     connect,
     disconnect,
     reconnectSaved,
-    refreshSnapshot,
-    refreshConnection,
   };
 }

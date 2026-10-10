@@ -1,7 +1,17 @@
 import { listen, type UnlistenFn } from "@/lib/transport";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
-import { assignMeterRange, getEnergySummary, removeMeterAssignment, setActiveMeter, setBillReading, setStandbyWatts } from "@/lib/tauri";
+import {
+  assignMeterRange,
+  getEnergySummary,
+  removeMeterAssignment,
+  removeMeterReading,
+  saveLastBillUnits,
+  saveMeterReadings,
+  setActiveMeter,
+  setBillReading,
+  setStandbyWatts,
+} from "@/lib/tauri";
 import type { EnergySummary, MeterNumber } from "@/lib/types";
 
 const SUMMARY_KEY = ["energy", "summary"] as const;
@@ -52,6 +62,35 @@ export function useEnergyUnits() {
     onSuccess: store,
   });
 
+  const saveReadings = useMutation({
+    mutationFn: ({
+      baseAt,
+      base1,
+      base2,
+      at,
+      meter1,
+      meter2,
+    }: {
+      baseAt: string | null;
+      base1: number;
+      base2: number;
+      at: string | null;
+      meter1: number;
+      meter2: number;
+    }) => saveMeterReadings(baseAt, base1, base2, at, meter1, meter2),
+    onSuccess: store,
+  });
+
+  const saveBillUnits = useMutation({
+    mutationFn: ({ meter1, meter2 }: { meter1: number; meter2: number }) => saveLastBillUnits(meter1, meter2),
+    onSuccess: store,
+  });
+
+  const removeReading = useMutation({
+    mutationFn: (at: string) => removeMeterReading(at),
+    onSuccess: store,
+  });
+
   return {
     summary: summaryQuery.data,
     isLoading: summaryQuery.isLoading,
@@ -60,5 +99,8 @@ export function useEnergyUnits() {
     switchMeter,
     assignRange,
     removeAssignment,
+    saveReadings,
+    removeReading,
+    saveBillUnits,
   };
 }
