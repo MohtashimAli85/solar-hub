@@ -87,6 +87,9 @@ const DIM_TICK: Duration = Duration::from_secs(300);
 const DAY_HISTORY_MINUTES: i64 = 90;
 const DAY_HISTORY_STEP_MINUTES: i64 = 5;
 const SUN_GONE_PV_W: f64 = 50.0;
+/// On SBG, PV under NO_SUN_PV_W with the battery draining this long sends a
+/// low-solar alert; it re-arms once PV is back to SUN_PV_W.
+const LOW_PV_ALERT_MINUTES: i64 = 30;
 const SUN_GONE_BEFORE_SUNSET_MINUTES: i64 = 60;
 const BOOST_MINUTES: i64 = 3;
 const BOOST_GAP_MINUTES: i64 = 5;
@@ -547,6 +550,8 @@ struct DayMemory {
     /// a failure.
     ai_next_at: Option<NaiveDateTime>,
     ai_failure_notified: bool,
+    low_pv_since: Option<NaiveDateTime>,
+    low_pv_notified: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1884,12 +1889,46 @@ async fn switch_day_mode(
 }
 
 async fn day_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &EngineReading, ctx: &Context) -> Duration {
+    watch_low_pv(engine, &mut memory.day, reading, ctx).await;
     let sleep_for = day_decide(engine, memory, reading, ctx).await;
     let day = &memory.day;
     let dim_on_sbg = !day.paused
         && day.effective_mode == Some(SBG_MODE)
         && day.sky.is_some_and(|(sky, _)| sky != Sky::Sun);
-    if dim_on_sbg { sleep_for.min(DIM_TICK) } else { sleep_for }
+    let sleep_for = if dim_on_sbg { sleep_for.min(DIM_TICK) } else { sleep_for };
+    let alert_at = day
+        .low_pv_since
+        .filter(|_| !day.low_pv_notified)
+        .map(|since| since + chrono::Duration::minutes(LOW_PV_ALERT_MINUTES));
+    until(ctx.clock.now, alert_at, sleep_for)
+}
+
+async fn watch_low_pv(engine: &Engine<'_>, day: &mut DayMemory, reading: &EngineReading, ctx: &Context) {
+    let now = ctx.clock.now;
+    if reading.pv_w.is_some_and(|pv| pv >= SUN_PV_W) {
+        day.low_pv_notified = false;
+    }
+    let low = reading.mode == Some(SBG_MODE)
+        && reading.pv_w.is_some_and(|pv| pv < NO_SUN_PV_W)
+        && draining_on_sbg(reading)
+        && !sun_is_done(ctx, reading);
+    if !low {
+        day.low_pv_since = None;
+        return;
+    }
+    let since = *day.low_pv_since.get_or_insert(now);
+    let minutes = (now - since).num_minutes();
+    if day.low_pv_notified || minutes < LOW_PV_ALERT_MINUTES {
+        return;
+    }
+    day.low_pv_notified = true;
+    let pv = reading.pv_w.unwrap_or_default().round();
+    let amps = reading.battery_a.unwrap_or_default().abs();
+    let message = format!(
+        "Solar is only making {pv} W and the battery has been draining ({amps:.1} A) for {minutes} minutes."
+    );
+    engine.state.notify_event(message.clone()).await;
+    engine.notifier.send("Low solar", &message);
 }
 
 async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &EngineReading, ctx: &Context) -> Duration {
@@ -2869,6 +2908,70 @@ mod tests {
             day_tick(&engine, &mut memory, &sbg_reading(100.0, 110.0, 120.0, 0.0), &ctx(now)).await;
         }
         assert_eq!(memory.day.effective_mode, Some(SBG_MODE));
+    }
+
+    fn low_solar_alerts(h: &Harness) -> usize {
+        h.notifier.sent.lock().unwrap().iter().filter(|body| body.starts_with("Solar is only making")).count()
+    }
+
+    fn failing_day_agent() -> FakeAgent {
+        FakeAgent::with_day((0..20).map(|_| Err("down".into())).collect())
+    }
+
+    #[tokio::test]
+    async fn no_sun_on_sbg_with_the_battery_draining_for_30_minutes_alerts_once() {
+        let h = Harness::new(true);
+        let agent = failing_day_agent();
+        let mut memory = day_memory(SBG_MODE);
+        let engine = h.engine(&agent);
+        let dark = sbg_reading(70.0, 500.0, 60.0, -10.0);
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 0))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 20))).await;
+        assert_eq!(low_solar_alerts(&h), 0);
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 30))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 35))).await;
+        assert_eq!(low_solar_alerts(&h), 1);
+    }
+
+    #[tokio::test]
+    async fn a_break_in_the_drain_restarts_the_low_solar_wait() {
+        let h = Harness::new(true);
+        let agent = failing_day_agent();
+        let mut memory = day_memory(SBG_MODE);
+        let engine = h.engine(&agent);
+        let dark = sbg_reading(70.0, 500.0, 60.0, -10.0);
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 0))).await;
+        day_tick(&engine, &mut memory, &sbg_reading(70.0, 50.0, 60.0, 0.0), &ctx(at(26, 11, 20))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 25))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 40))).await;
+        assert_eq!(low_solar_alerts(&h), 0);
+    }
+
+    #[tokio::test]
+    async fn low_solar_alert_re_arms_once_the_sun_is_back() {
+        let h = Harness::new(true);
+        let agent = failing_day_agent();
+        let mut memory = day_memory(SBG_MODE);
+        let engine = h.engine(&agent);
+        let dark = sbg_reading(70.0, 500.0, 60.0, -10.0);
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 0))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 30))).await;
+        day_tick(&engine, &mut memory, &sbg_reading(70.0, 500.0, 800.0, 5.0), &ctx(at(26, 12, 0))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 13, 0))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 13, 30))).await;
+        assert_eq!(low_solar_alerts(&h), 2);
+    }
+
+    #[tokio::test]
+    async fn low_solar_on_solar_mode_never_alerts() {
+        let h = Harness::new(true);
+        let agent = failing_day_agent();
+        let mut memory = day_memory(SOLAR_MODE);
+        let engine = h.engine(&agent);
+        let dark = EngineReading { battery_a: Some(-10.0), pv_w: Some(60.0), ..reading(70.0, SOLAR_MODE, 500.0) };
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 0))).await;
+        day_tick(&engine, &mut memory, &dark, &ctx(at(26, 11, 45))).await;
+        assert_eq!(low_solar_alerts(&h), 0);
     }
 
     #[tokio::test]

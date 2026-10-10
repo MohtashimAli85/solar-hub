@@ -174,6 +174,23 @@ async fn dispatch(app: &AppHandle, command: &str, args: &Value) -> Result<Option
             en::assign_meter_range(app.clone(), app.state(), arg(args, "from")?, arg(args, "to")?, arg(args, "meter")?).await,
         ),
         "remove_meter_assignment" => to_json(en::remove_meter_assignment(app.clone(), app.state(), arg(args, "from")?).await),
+        "save_meter_readings" => to_json(
+            en::save_meter_readings(
+                app.clone(),
+                app.state(),
+                arg(args, "baseAt")?,
+                arg(args, "base1")?,
+                arg(args, "base2")?,
+                arg(args, "at")?,
+                arg(args, "meter1")?,
+                arg(args, "meter2")?,
+            )
+            .await,
+        ),
+        "save_last_bill_units" => {
+            to_json(en::save_last_bill_units(app.clone(), app.state(), arg(args, "meter1")?, arg(args, "meter2")?).await)
+        }
+        "remove_meter_reading" => to_json(en::remove_meter_reading(app.clone(), app.state(), arg(args, "at")?).await),
         "set_active_meter" => {
             to_json(en::set_active_meter(app.clone(), app.state(), arg(args, "meter")?, arg(args, "at")?).await)
         }
