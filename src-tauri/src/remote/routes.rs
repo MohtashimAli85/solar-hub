@@ -188,8 +188,11 @@ async fn dispatch(app: &AppHandle, command: &str, args: &Value) -> Result<Option
             .await,
         ),
         "save_last_bill_units" => {
-            to_json(en::save_last_bill_units(app.clone(), app.state(), arg(args, "meter1")?, arg(args, "meter2")?).await)
+            to_json(en::save_last_bill_units(app.clone(), app.state(), arg(args, "start")?, arg(args, "meter1")?, arg(args, "meter2")?).await)
         }
+        "set_bill_rates" => to_json(
+            en::set_bill_rates(app.clone(), app.state(), arg(args, "fpa")?, arg(args, "qtr")?, arg(args, "adjustment")?).await,
+        ),
         "remove_meter_reading" => to_json(en::remove_meter_reading(app.clone(), app.state(), arg(args, "at")?).await),
         "set_active_meter" => {
             to_json(en::set_active_meter(app.clone(), app.state(), arg(args, "meter")?, arg(args, "at")?).await)

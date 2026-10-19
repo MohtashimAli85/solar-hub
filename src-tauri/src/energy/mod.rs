@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod records;
 pub mod runner;
+pub mod tariff;
 pub mod units;
 
 use std::collections::BTreeMap;
@@ -13,12 +14,15 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::automation::history::HistoryStore;
 use records::EnergyRecords;
+use tariff::{expected_bill, savings, BillEstimate, BillRates, PeriodSavings, PeriodUsage};
 use units::{
     bill_period, compute_day, counted_since, meter_balance, meters_now, split_day, BillPeriod, DayUnits, HourUnits, MeterAssignment,
     BilledUnits, MeterBalance, MeterReading, MetersNow, Reading, UnitPoint,
 };
 
 const RECENT_DAYS: i64 = 14;
+/// How many bill periods back the savings table reaches.
+const SAVINGS_PERIODS: usize = 12;
 
 const READING_TIME_FORMAT: &str = "%H:%M";
 
@@ -46,6 +50,8 @@ pub struct EnergyConfig {
     pub bill_reading_time: String,
     #[serde(default = "default_standby_w")]
     pub standby_w: f64,
+    #[serde(default)]
+    pub rates: BillRates,
 }
 
 impl Default for EnergyConfig {
@@ -54,6 +60,7 @@ impl Default for EnergyConfig {
             bill_reading_day: default_reading_day(),
             bill_reading_time: default_reading_time(),
             standby_w: default_standby_w(),
+            rates: BillRates::default(),
         }
     }
 }
@@ -92,6 +99,9 @@ pub struct EnergySummary {
     pub opening_reading: Option<MeterReading>,
     pub latest_reading: Option<MeterReading>,
     pub previous_billed: Option<BilledUnits>,
+    pub bill_rates: BillRates,
+    pub expected_bill: Option<BillEstimate>,
+    pub savings: Vec<PeriodSavings>,
     pub bill_reading_day: u32,
     pub bill_reading_time: String,
     pub standby_w: f64,
@@ -306,9 +316,15 @@ impl EnergyState {
         drop(live);
 
         let active = switches.last().copied();
+        let mut period_starts = vec![current_start];
+        while period_starts.len() < SAVINGS_PERIODS {
+            let earlier = reading.period_start(period_starts[period_starts.len() - 1] - Duration::seconds(1));
+            period_starts.push(earlier);
+        }
+        period_starts.reverse();
         let mut days: Vec<DayUnits> = self
             .records
-            .days_between(previous_start.date(), today)
+            .days_between(period_starts[0].date(), today)
             .into_iter()
             .filter(|day| day.date < today)
             .map(|day| {
@@ -343,19 +359,63 @@ impl EnergyState {
                 &counted_since(&days, latest_split.as_ref(), latest.at),
             )
         });
-        let previous_billed = self.records.billed_units().into_iter().find(|bill| bill.start.date() == previous_start.date());
+        let billed = self.records.billed_units();
+        let billed_for = |start: NaiveDateTime| billed.iter().find(|bill| bill.start.date() == start.date()).copied();
+        let previous_billed = billed_for(previous_start);
+        let history: Vec<PeriodUsage> = period_starts
+            .iter()
+            .map(|&start| {
+                let period = if start == current_start { bill.clone() } else { bill_period(&days, &splits, start, now, active_meter) };
+                let split = period.so_far;
+                let (meter1, meter2, is_billed) = match (billed_for(start), &meters) {
+                    (Some(bill), _) => (bill.meter1, bill.meter2, true),
+                    (None, Some(meters)) if start == current_start => (meters.meter1_kwh, meters.meter2_kwh, false),
+                    _ => (split.meter1_kwh + split.unassigned_kwh / 2.0, split.meter2_kwh + split.unassigned_kwh / 2.0, false),
+                };
+                PeriodUsage {
+                    start,
+                    end: period.end,
+                    partial: start == current_start,
+                    billed: is_billed,
+                    meter1,
+                    meter2,
+                    house_kwh: period.house_kwh,
+                    grid_kwh: split.grid_kwh,
+                    coverage: if period.elapsed_hours > 0.0 { (period.log_hours / period.elapsed_hours).min(1.0) } else { 0.0 },
+                }
+            })
+            .skip_while(|usage| usage.house_kwh <= 0.0 && !usage.billed)
+            .collect();
+        let rates = config.rates;
+        let balance = meter_balance(&bill, active_meter, now, meters.as_ref());
+        let expected_units = match (&balance, &bill.projected) {
+            (Some(plan), _) => Some(((plan.meter1_kwh, plan.meter2_kwh), "plan")),
+            (None, Some(projected)) => {
+                let factor = meters.as_ref().map_or(1.0, |meters| meters.factor);
+                let rest = |key: fn(&units::GridSplit) -> f64| (key(projected) - key(&bill.so_far)).max(0.0) * factor;
+                let (now1, now2) = history.last().map_or((0.0, 0.0), |usage| (usage.meter1, usage.meter2));
+                let unassigned = rest(|split| split.unassigned_kwh) / 2.0;
+                Some(((now1 + rest(|split| split.meter1_kwh) + unassigned, now2 + rest(|split| split.meter2_kwh) + unassigned), "pace"))
+            }
+            _ => None,
+        };
+        let expected = expected_units.and_then(|(units, basis)| expected_bill(&history, units, basis, &rates));
+        let savings = savings(&history, &rates);
         let summary = EnergySummary {
             configured,
             today: today_units,
             today_hourly,
             yesterday,
             recent_days,
-            balance: meter_balance(&bill, active_meter, now, meters.as_ref()),
+            balance,
             meters,
             readings,
             opening_reading: base_reading,
             latest_reading,
             previous_billed,
+            bill_rates: rates,
+            expected_bill: expected,
+            savings,
             bill: Some(bill),
             previous_bill: Some(bill_period(&days, &splits, previous_start, now, active_meter)),
             bill_reading_day: reading.day,
@@ -389,7 +449,7 @@ mod tests {
         let old: EnergyConfig = serde_json::from_str(r#"{"bill_reading_day": 12}"#).unwrap();
         assert_eq!(old.bill_reading_time, "11:57");
         assert_eq!(old.standby_w, 14.0);
-        let odd = EnergyConfig { bill_reading_day: 31, bill_reading_time: "noon".into(), standby_w: 0.0 };
+        let odd = EnergyConfig { bill_reading_day: 31, bill_reading_time: "noon".into(), standby_w: 0.0, rates: BillRates::default() };
         assert_eq!(odd.reading(), Reading { day: 28, time: NaiveTime::MIN });
     }
 

@@ -381,6 +381,7 @@ pub struct BillPeriod {
     pub days_total: u32,
     pub days_with_data: u32,
     pub so_far: GridSplit,
+    pub house_kwh: f64,
     pub standby_kwh: f64,
     /// Hours of the period so far that the inverter's log covers, against the
     /// hours that have passed; a gap means units that weren't counted.
@@ -410,6 +411,7 @@ pub fn bill_period(
     let (first, last) = (start.date(), next.date());
     let mut so_far = GridSplit::default();
     let mut standby_kwh = 0.0;
+    let mut house_kwh = 0.0;
     let mut log_hours = 0.0;
     let mut days_with_data = 0;
     for day in days.iter().filter(|day| day.date >= first && day.date <= last) {
@@ -422,6 +424,7 @@ pub fn bill_period(
         };
         so_far = so_far.plus(&part.grid);
         standby_kwh += part.standby_kwh;
+        house_kwh += part.house_kwh;
         log_hours += part.data_hours;
         if day.has_data() && day.date < last {
             days_with_data += 1;
@@ -441,6 +444,7 @@ pub fn bill_period(
         days_total: (last - first).num_days() as u32,
         days_with_data,
         so_far,
+        house_kwh,
         standby_kwh,
         log_hours,
         elapsed_hours: (now.min(next) - start).num_seconds().max(0) as f64 / 3600.0,
@@ -854,6 +858,7 @@ mod tests {
             days_total: 30,
             days_with_data: 10,
             so_far,
+            house_kwh: 0.0,
             standby_kwh: 0.0,
             log_hours: 0.0,
             elapsed_hours: 0.0,

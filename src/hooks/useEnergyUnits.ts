@@ -7,6 +7,7 @@ import {
   removeMeterAssignment,
   removeMeterReading,
   saveLastBillUnits,
+  setBillRates,
   saveMeterReadings,
   setActiveMeter,
   setBillReading,
@@ -82,7 +83,13 @@ export function useEnergyUnits() {
   });
 
   const saveBillUnits = useMutation({
-    mutationFn: ({ meter1, meter2 }: { meter1: number; meter2: number }) => saveLastBillUnits(meter1, meter2),
+    mutationFn: ({ start = null, meter1, meter2 }: { start?: string | null; meter1: number; meter2: number }) =>
+      saveLastBillUnits(start, meter1, meter2),
+    onSuccess: store,
+  });
+
+  const saveRates = useMutation({
+    mutationFn: ({ fpa, qtr, adjustment }: { fpa: number; qtr: number; adjustment: number }) => setBillRates(fpa, qtr, adjustment),
     onSuccess: store,
   });
 
@@ -102,5 +109,6 @@ export function useEnergyUnits() {
     saveReadings,
     removeReading,
     saveBillUnits,
+    saveRates,
   };
 }

@@ -374,6 +374,46 @@ export interface MeterReading {
   meter2: number;
 }
 
+export interface BillRates {
+  fpa_per_unit: number;
+  qtr_per_unit: number;
+  adjustment_per_unit: number;
+}
+
+export interface MeterBill {
+  units: number;
+  fpa_units: number;
+  protected: boolean;
+  energy: number;
+  fixed: number;
+  surcharges: number;
+  taxes: number;
+  fpa: number;
+  total: number;
+}
+
+export interface BillEstimate {
+  start: string;
+  end: string;
+  basis: "plan" | "pace";
+  meter1: MeterBill;
+  meter2: MeterBill;
+  total: number;
+}
+
+export interface PeriodSavings {
+  start: string;
+  end: string;
+  partial: boolean;
+  billed: boolean;
+  coverage: number;
+  units: number;
+  units_without: number;
+  bill: number;
+  bill_without: number;
+  saved: number;
+}
+
 export interface BilledUnits {
   start: string;
   meter1: number;
@@ -403,6 +443,9 @@ export interface EnergySummary {
   opening_reading: MeterReading | null;
   latest_reading: MeterReading | null;
   previous_billed: BilledUnits | null;
+  bill_rates: BillRates;
+  expected_bill: BillEstimate | null;
+  savings: PeriodSavings[];
   bill_reading_day: number;
   bill_reading_time: string;
   standby_w: number;

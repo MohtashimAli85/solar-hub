@@ -154,6 +154,7 @@ pub fn run() {
             energy::commands::save_meter_readings,
             energy::commands::remove_meter_reading,
             energy::commands::save_last_bill_units,
+            energy::commands::set_bill_rates,
             remote::commands::get_remote_status,
             remote::commands::set_remote_enabled,
             remote::commands::regenerate_remote_pin,

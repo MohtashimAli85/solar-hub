@@ -2,6 +2,7 @@ use tauri::{AppHandle, State};
 
 use chrono::NaiveDateTime;
 
+use super::tariff::BillRates;
 use super::units::{BilledUnits, MeterAssignment, MeterReading, MeterSwitch};
 use super::{parse_reading_time, switch_time, EnergyConfig, EnergyState, EnergySummary, MAX_STANDBY_W};
 use crate::events;
@@ -170,11 +171,13 @@ pub async fn save_meter_readings(
     Ok(summary)
 }
 
-/// Saves the units the last bill charged each meter, to compare with the count.
+/// Saves the units a bill charged each meter: the bill opened at `start`, or
+/// the last bill when not given.
 #[tauri::command]
 pub async fn save_last_bill_units(
     app: AppHandle,
     state: State<'_, EnergyState>,
+    start: Option<String>,
     meter1: f64,
     meter2: f64,
 ) -> Result<EnergySummary, String> {
@@ -182,11 +185,30 @@ pub async fn save_last_bill_units(
         return Err("Enter each meter's units as a number.".into());
     }
     let now = state.now().await;
-    let start = state.config().await.reading().previous_period_start(now);
+    let start = match start.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => parse_moment(text)?,
+        None => state.config().await.reading().previous_period_start(now),
+    };
     state.records.set_billed_units(BilledUnits { start, meter1, meter2 })?;
     let summary = state.rebuild().await;
     events::emit(&app, events::ENERGY_UPDATED, summary.clone());
     Ok(summary)
+}
+
+#[tauri::command]
+pub async fn set_bill_rates(
+    app: AppHandle,
+    state: State<'_, EnergyState>,
+    fpa: f64,
+    qtr: f64,
+    adjustment: f64,
+) -> Result<EnergySummary, String> {
+    if [fpa, qtr, adjustment].iter().any(|value| !value.is_finite()) {
+        return Err("Enter each rate as a number.".into());
+    }
+    let rates = BillRates { fpa_per_unit: fpa, qtr_per_unit: qtr, adjustment_per_unit: adjustment };
+    let config = EnergyConfig { rates, ..state.config().await };
+    save(&app, &state, config).await
 }
 
 #[tauri::command]

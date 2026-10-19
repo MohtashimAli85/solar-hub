@@ -1,5 +1,6 @@
 import { AutomationSummaryCard } from "@/components/dashboard/AutomationSummaryCard";
 import { CommandHero } from "@/components/dashboard/CommandHero";
+import { BillCard } from "@/components/dashboard/BillCard";
 import { UnitsCard } from "@/components/dashboard/UnitsCard";
 import { OutputSourcePanel } from "@/components/inverter/OutputSourcePanel";
 import { useAutomation } from "@/hooks/useAutomation";
@@ -51,6 +52,8 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
       </div>
 
       <UnitsCard />
+
+      <BillCard />
     </div>
   );
 }

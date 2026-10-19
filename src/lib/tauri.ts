@@ -125,8 +125,11 @@ export const saveMeterReadings = (
   meter2: number,
 ) => invoke<EnergySummary>("save_meter_readings", { baseAt, base1, base2, at, meter1, meter2 });
 
-export const saveLastBillUnits = (meter1: number, meter2: number) =>
-  invoke<EnergySummary>("save_last_bill_units", { meter1, meter2 });
+export const saveLastBillUnits = (start: string | null, meter1: number, meter2: number) =>
+  invoke<EnergySummary>("save_last_bill_units", { start, meter1, meter2 });
+
+export const setBillRates = (fpa: number, qtr: number, adjustment: number) =>
+  invoke<EnergySummary>("set_bill_rates", { fpa, qtr, adjustment });
 
 export const removeMeterReading = (at: string) => invoke<EnergySummary>("remove_meter_reading", { at });
 
