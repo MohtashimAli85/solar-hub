@@ -2,6 +2,7 @@ import { Battery, BrainCircuit, Gauge, Moon, Settings, Sun } from "lucide-react"
 import { Button } from "@/components/ui/button";
 import type { Theme } from "@/hooks/useTheme";
 import { cn } from "@/lib/utils";
+import { SolarHubMark } from "./SolarHubMark";
 
 export type Tab = "dashboard" | "battery" | "inverter" | "automation" | "settings";
 
@@ -26,7 +27,7 @@ interface ThemeProps {
 function Logo() {
   return (
     <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
-      <Sun className="size-4" />
+      <SolarHubMark className="size-5" />
     </span>
   );
 }

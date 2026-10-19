@@ -1,7 +1,7 @@
-import { Sun } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
+import { SolarHubMark } from "@/components/layout/SolarHubMark";
 import { pairPhone } from "@/lib/transport";
 
 function takePinFromUrl(): string | null {
@@ -50,7 +50,7 @@ export function PairScreen({ onPaired }: { onPaired: () => void }) {
       <form onSubmit={onSubmit} className="w-full max-w-sm space-y-5 rounded-xl border border-border bg-card p-6">
         <div className="flex items-center gap-3">
           <span className="flex size-10 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <Sun className="size-5" />
+            <SolarHubMark className="size-6" />
           </span>
           <div>
             <h1 className="text-lg font-semibold leading-tight">Solar Hub</h1>
