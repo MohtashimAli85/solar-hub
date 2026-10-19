@@ -155,11 +155,9 @@ pub struct WeatherBrief {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SmartLoadBrief {
-    pub season: String,
     pub currently_on: Option<bool>,
-    pub choose_on_time: bool,
-    pub earliest: String,
-    pub latest: String,
+    pub trigger_amps: f64,
+    pub trigger_minutes: u32,
 }
 
 /// Everything is pre-computed here so the model reasons instead of doing
@@ -217,8 +215,6 @@ pub struct NightPlan {
     pub recheck_minutes: f64,
     pub confidence: f64,
     pub reason: String,
-    #[serde(default)]
-    pub smart_load_on_at: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
 }

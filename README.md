@@ -74,8 +74,8 @@ The day is split into two windows:
 
 The **usual night start** (21:00 by default, adjustable from 17:00 to 23:00)
 is when the battery plan normally begins. Between sunset and then, the
-battery can start early (see below). Smart load and the oven boost still go
-by the usual start.
+battery can start early (see below). The oven boost still goes by the usual
+start.
 
 ### Evening: starting the battery early
 
@@ -201,15 +201,21 @@ still shows the projected charge at sunset.
 ### Smart load
 
 - **On = smart load enabled:** heavy loads and the connections that aren't on
-  the UPS are cut. This protects the battery.
+  the UPS are cut. This protects the battery. It only cuts anything while the
+  battery is powering the house; on grid or solar nothing is cut either way.
 - **Off = smart load disabled:** nothing is cut; everything runs.
 
 The app sets it like this:
 
 - **Day:** off at sunrise, so everything runs on the sun.
-- **Night:** on, to protect the battery. In summer (April–August) it goes on
-  right at the night start. The rest of the year the agent picks a time
-  between the night start and 23:00, and 23:00 is the latest.
+- **Night:** on only when the battery drain stays high — 25 A or more for
+  10 minutes by default (both in Settings), such as AC running from the
+  battery on an SBG night or through load-shedding. It has to be high for 8 of
+  those 10 minutes, so a few minutes of oven or kettle don't count, and a
+  light night (winter, or just lights and fans) never turns it on. While the
+  battery carries the house the drain is checked every minute. Once on, it
+  stays on until the near-morning release below, because with heavy loads cut
+  the drain looks low and can't tell us they're safe to bring back.
 - **Near morning:** back off once the battery can easily reach sunrise above
   tonight's reserve *with everything running*. That's worked out from your
   heaviest usual night-time load, or 1 kW if there's no history yet. Once off,

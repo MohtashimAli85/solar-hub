@@ -23,10 +23,13 @@ pub struct RecordsInfo {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SmartLoadInsight {
-    pub season: &'static str,
     pub on: Option<bool>,
-    pub planned_on_at: Option<NaiveDateTime>,
-    pub night_on_at: Option<NaiveDateTime>,
+    /// At night it goes on once the battery drain holds at or above
+    /// `trigger_amps` for `trigger_minutes`. 0 amps = never.
+    pub trigger_amps: f64,
+    pub trigger_minutes: u32,
+    /// The latest battery drain the night has seen.
+    pub drain_a: Option<f64>,
     /// The state the engine last set this window (true = enabled, heavy loads cut).
     pub applied: Option<bool>,
     /// Near morning with enough battery: disabled for the rest of the night.

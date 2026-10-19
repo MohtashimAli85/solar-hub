@@ -9,7 +9,15 @@ import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
 import { hourLabel, SectionTitle } from "./shared";
 
-type NumericKey = "check_interval_minutes" | "min_soc_percent" | "capacity_ah" | "sunrise_buffer_hours" | "pv_array_watts" | "oven_boost_amps";
+type NumericKey =
+  | "check_interval_minutes"
+  | "min_soc_percent"
+  | "capacity_ah"
+  | "sunrise_buffer_hours"
+  | "pv_array_watts"
+  | "oven_boost_amps"
+  | "smart_load_drain_amps"
+  | "smart_load_drain_minutes";
 type TuningKey = NumericKey | "night_start_hour" | "notifications_enabled";
 type Tuning = Pick<AutomationConfig, TuningKey>;
 
@@ -20,6 +28,8 @@ const RANGES: Record<NumericKey, { min: number; max: number }> = {
   sunrise_buffer_hours: { min: 0, max: 6 },
   pv_array_watts: { min: 0, max: 100_000 },
   oven_boost_amps: { min: 0, max: 300 },
+  smart_load_drain_amps: { min: 0, max: 300 },
+  smart_load_drain_minutes: { min: 1, max: 60 },
 };
 
 const NIGHT_START_HOURS = [17, 18, 19, 20, 21, 22, 23];
@@ -39,6 +49,8 @@ function pickTuning(config: AutomationConfig): Tuning {
     sunrise_buffer_hours: config.sunrise_buffer_hours,
     pv_array_watts: config.pv_array_watts,
     oven_boost_amps: config.oven_boost_amps,
+    smart_load_drain_amps: config.smart_load_drain_amps,
+    smart_load_drain_minutes: config.smart_load_drain_minutes,
     night_start_hour: config.night_start_hour,
     notifications_enabled: config.notifications_enabled,
   };
@@ -173,6 +185,22 @@ export function AutomationSettingsForm({ config, saving, testing, onSave, onTest
               value={form.oven_boost_amps}
               error={errors.oven_boost_amps}
               onChange={(value) => set("oven_boost_amps", value)}
+            />
+            <NumberField
+              id="smart-load-amps"
+              label="Smart load on above (A)"
+              help="At night, smart load goes on (heavy loads cut) only when the battery drain stays at or above this. A light night never turns it on. 0 = never."
+              value={form.smart_load_drain_amps}
+              error={errors.smart_load_drain_amps}
+              onChange={(value) => set("smart_load_drain_amps", value)}
+            />
+            <NumberField
+              id="smart-load-minutes"
+              label="…for at least (minutes)"
+              help="How long the drain has to stay high first, so a few minutes of oven or kettle don't count."
+              value={form.smart_load_drain_minutes}
+              error={errors.smart_load_drain_minutes}
+              onChange={(value) => set("smart_load_drain_minutes", value)}
             />
             <NumberField
               id="interval"

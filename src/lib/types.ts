@@ -83,6 +83,8 @@ export interface AutomationConfig {
   night_start_hour: number;
   pv_array_watts: number;
   oven_boost_amps: number;
+  smart_load_drain_amps: number;
+  smart_load_drain_minutes: number;
   notifications_enabled: boolean;
 }
 
@@ -221,10 +223,12 @@ export interface AutomationInsights {
 }
 
 export interface SmartLoadInsight {
-  season: "summer" | "winter";
   on: boolean | null;
-  planned_on_at: LocalDateTime | null;
-  night_on_at: LocalDateTime | null;
+  /** At night it goes on once the battery drain holds at or above this for trigger_minutes. 0 = never. */
+  trigger_amps: number;
+  trigger_minutes: number;
+  /** The latest battery drain tonight. */
+  drain_a: number | null;
   /** What the engine last set this window: true = on (heavy loads cut). */
   applied: boolean | null;
   /** Near morning with enough battery: off for the rest of the night. */

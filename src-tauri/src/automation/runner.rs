@@ -1,6 +1,7 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, Timelike, Utc};
 use tauri::AppHandle;
 
 use crate::automation::agent::{
@@ -58,8 +59,13 @@ const HISTORY_NIGHTS: usize = 7;
 const RECENT_DAYS: i64 = 7;
 const NOMINAL_PACK_VOLTS: f64 = 51.2;
 const INVERTER_EFFICIENCY: f64 = 0.9;
-const SUMMER_MONTHS: std::ops::RangeInclusive<u32> = 4..=8;
-const SMART_LOAD_LATEST_HOUR: u32 = 23;
+/// Smart load goes on once the battery drain has been at or above its
+/// trigger for this share of the window, so a few minutes of oven or kettle
+/// don't count.
+const SMART_LOAD_HIGH_SHARE: f64 = 0.8;
+const SMART_LOAD_POLL: Duration = Duration::from_secs(60);
+/// A longer gap between drain readings starts the window over.
+const SMART_LOAD_MAX_GAP_MINUTES: i64 = 5;
 const HEAVY_LOAD_FALLBACK_W: f64 = 1000.0;
 const DAY_DRAIN_A: f64 = 1.0;
 /// By day SBG stays unless the sun is gone (see `day_switch_after`). In SBG a
@@ -248,10 +254,6 @@ impl Clock {
 
     fn night_start(&self) -> NaiveDateTime {
         self.night_start_on(self.night())
-    }
-
-    fn night_on(&self, hour: u32) -> NaiveDateTime {
-        self.night().and_hms_opt(hour, 0, 0).unwrap_or(self.now)
     }
 
     fn next_solar_day(&self) -> NaiveDate {
@@ -491,7 +493,7 @@ struct NightMemory {
     engagements: u32,
     last_write_at: Option<Instant>,
     last_written_mode: Option<u32>,
-    smart_load_on_at: Option<NaiveDateTime>,
+    drain_samples: VecDeque<(NaiveDateTime, f64)>,
     smart_load_applied: Option<bool>,
     smart_load_released: bool,
     last_reserve_soc: Option<f64>,
@@ -523,7 +525,7 @@ impl Default for NightMemory {
             engagements: 0,
             last_write_at: None,
             last_written_mode: None,
-            smart_load_on_at: None,
+            drain_samples: VecDeque::new(),
             smart_load_applied: None,
             smart_load_released: false,
             last_reserve_soc: None,
@@ -917,7 +919,6 @@ struct ClampedPlan {
     recheck_minutes: u32,
     confidence: f64,
     reason: String,
-    smart_load_on_at: Option<String>,
     model: Option<String>,
 }
 
@@ -940,7 +941,6 @@ fn clamp_night_plan(plan: agent::NightPlan, min_reserve: f64) -> ClampedPlan {
         recheck_minutes: clamp_recheck(plan.recheck_minutes),
         confidence: plan.confidence,
         reason: plan.reason,
-        smart_load_on_at: plan.smart_load_on_at,
         model: plan.model,
     }
 }
@@ -950,39 +950,64 @@ fn clamp_recheck(minutes: f64) -> u32 {
     minutes.clamp(MIN_RECHECK_MINUTES, MAX_RECHECK_MINUTES).round() as u32
 }
 
-fn is_summer(date: NaiveDate) -> bool {
-    SUMMER_MONTHS.contains(&date.month())
+/// Smart load only cuts anything while the battery powers the house: on
+/// battery (SBG) or during an outage.
+fn battery_carries_house(night: &NightMemory, reading: &EngineReading) -> bool {
+    night.effective_mode == Some(SBG_MODE) || reading.grid_on() == Some(false)
 }
 
-/// Summer nights need the smart-load circuit (fans, AC) from the start of
-/// the night; in winter the agent may start it later, but never after 23:00.
-fn smart_load_on_time(clock: &Clock, night: &NightMemory) -> NaiveDateTime {
-    let start = clock.night_start();
-    if is_summer(clock.night()) {
-        return start;
+/// Battery amps going out right now. While dry run pretends to be on battery
+/// the real pack isn't draining, so the load is used instead.
+fn battery_drain_a(night: &NightMemory, reading: &EngineReading, dry_run: bool) -> Option<f64> {
+    let estimate = || estimate_discharge_a(reading.load_w, reading.pv_w, reading.batt_v);
+    if dry_run && night.effective_mode == Some(SBG_MODE) {
+        return estimate();
     }
-    let latest = clock.night_on(SMART_LOAD_LATEST_HOUR).max(start);
-    night.smart_load_on_at.unwrap_or(latest).clamp(start, latest)
+    reading
+        .battery_a
+        .map(|amps| (-amps).max(0.0))
+        .or_else(|| battery_carries_house(night, reading).then(estimate).flatten())
 }
 
-fn remember_smart_load_time(night: &mut NightMemory, clock: &Clock, requested: Option<&str>) {
-    if is_summer(clock.night()) {
+fn record_drain(night: &mut NightMemory, reading: &EngineReading, config: &AutomationConfig, now: NaiveDateTime) {
+    let Some(amps) = battery_drain_a(night, reading, config.dry_run) else {
         return;
+    };
+    let samples = &mut night.drain_samples;
+    if samples
+        .back()
+        .is_some_and(|(at, _)| now - *at > chrono::Duration::minutes(SMART_LOAD_MAX_GAP_MINUTES))
+    {
+        samples.clear();
     }
-    if let Some(time) = requested.and_then(|text| NaiveTime::parse_from_str(text.trim(), "%H:%M").ok()) {
-        night.smart_load_on_at = Some(clock.night().and_time(time));
+    samples.push_back((now, amps));
+    let start = now - chrono::Duration::minutes(config.smart_load_drain_minutes as i64);
+    while samples.len() >= 2 && samples[1].0 <= start {
+        samples.pop_front();
     }
 }
 
-fn smart_load_brief(clock: &Clock, reading: &EngineReading) -> SmartLoadBrief {
-    let summer = is_summer(clock.night());
-    SmartLoadBrief {
-        season: if summer { "summer" } else { "winter" }.into(),
-        currently_on: reading.smart_load,
-        choose_on_time: !summer,
-        earliest: hhmm(clock.night_start()),
-        latest: hhmm(clock.night_on(SMART_LOAD_LATEST_HOUR).max(clock.night_start())),
+/// The average drain over the trigger window, when it stayed at or above the
+/// trigger for most of it.
+fn sustained_drain(samples: &VecDeque<(NaiveDateTime, f64)>, now: NaiveDateTime, config: &AutomationConfig) -> Option<f64> {
+    if config.smart_load_drain_amps <= 0.0 {
+        return None;
     }
+    let start = now - chrono::Duration::minutes(config.smart_load_drain_minutes as i64);
+    if samples.front().is_none_or(|(at, _)| *at > start) {
+        return None;
+    }
+    let (mut total, mut high, mut amp_seconds) = (0.0, 0.0, 0.0);
+    for (index, (at, amps)) in samples.iter().enumerate() {
+        let end = samples.get(index + 1).map_or(now, |(next, _)| *next);
+        let seconds = (end - (*at).max(start)).num_seconds().max(0) as f64;
+        total += seconds;
+        amp_seconds += amps * seconds;
+        if *amps >= config.smart_load_drain_amps {
+            high += seconds;
+        }
+    }
+    (total > 0.0 && high >= total * SMART_LOAD_HIGH_SHARE).then(|| amp_seconds / total)
 }
 
 /// Whether the battery can reach sunrise above tonight's reserve even with
@@ -1017,29 +1042,38 @@ fn battery_covers_everything_until_sunrise(
 
 /// Smart load ON (enabled) cuts heavy loads and non-UPS circuits to protect
 /// the battery; OFF (disabled) lets everything run. Each target is applied
-/// once when it changes, so a manual change in between is left alone.
+/// once when it changes, so a manual change in between is left alone. At night
+/// it goes on only when the battery drain stays high (AC on the battery), and
+/// then stays on until the morning release.
 async fn apply_smart_load(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &EngineReading, ctx: &Context) -> Option<Duration> {
     let now = ctx.clock.now;
     let config = engine.config;
-    let (enable, due, reason) = match memory.window? {
-        Window::Day => (false, now, "disable smart load for the day — plenty of sun, so everything can run".to_string()),
+    let (enable, reason) = match memory.window? {
+        Window::Day => (false, "disable smart load for the day — plenty of sun, so everything can run".to_string()),
         Window::Night => {
-            if memory.night.boost.is_some() || night_soc(&memory.night, reading, config.dry_run).is_none() {
+            let night = &mut memory.night;
+            if night.boost.is_some() || night_soc(night, reading, config.dry_run).is_none() {
                 return None;
             }
-            if !memory.night.smart_load_released && battery_covers_everything_until_sunrise(ctx, reading, &memory.night, config) {
-                memory.night.smart_load_released = true;
+            if !night.smart_load_released && battery_covers_everything_until_sunrise(ctx, reading, night, config) {
+                night.smart_load_released = true;
             }
-            if memory.night.smart_load_released {
-                (false, now, "disable smart load — the battery easily lasts until sunrise with everything running".to_string())
+            if night.smart_load_released {
+                (false, "disable smart load — the battery easily lasts until sunrise with everything running".to_string())
+            } else if night.smart_load_applied == Some(true) || reading.smart_load == Some(true) {
+                return None;
             } else {
-                let due = smart_load_on_time(&ctx.clock, &memory.night);
-                let reason = if is_summer(ctx.clock.night()) {
-                    "enable smart load for the night — cutting heavy and non-UPS loads to protect the battery (summer)".to_string()
-                } else {
-                    format!("enable smart load for the night — cutting heavy and non-UPS loads to protect the battery (winter, from {})", clock_time(due))
+                record_drain(night, reading, config, now);
+                let Some(average) = sustained_drain(&night.drain_samples, now, config) else {
+                    return battery_carries_house(night, reading).then_some(SMART_LOAD_POLL);
                 };
-                (true, due, reason)
+                (
+                    true,
+                    format!(
+                        "enable smart load — the battery has been draining about {average:.0} A for {} minutes, so heavy and non-UPS loads are cut to protect it",
+                        config.smart_load_drain_minutes
+                    ),
+                )
             }
         }
     };
@@ -1049,9 +1083,6 @@ async fn apply_smart_load(engine: &Engine<'_>, memory: &mut EngineMemory, readin
     };
     if *applied == Some(enable) {
         return None;
-    }
-    if now < due {
-        return Some(until(now, Some(due), normal_interval(config)));
     }
     if reading.smart_load == Some(enable) {
         *applied = Some(enable);
@@ -1250,7 +1281,11 @@ fn build_night_input(
             })
             .collect(),
         weather: ctx.weather.as_ref().map(|summary| weather_brief(summary, now.date())),
-        smart_load: smart_load_brief(&ctx.clock, reading),
+        smart_load: SmartLoadBrief {
+            currently_on: reading.smart_load,
+            trigger_amps: config.smart_load_drain_amps,
+            trigger_minutes: config.smart_load_drain_minutes,
+        },
         usual_night_start: hhmm(ctx.clock.night_start()),
         before_usual_start: now < ctx.clock.night_start(),
         sunrise_soc_if_waiting: (!on_battery).then(|| sunrise_soc_if_waiting(ctx, reading, config, soc)).flatten().map(f64::round),
@@ -1569,7 +1604,6 @@ async fn night_deciding(
     };
     memory.night.ai_failure_notified = false;
     memory.night.last_reserve_soc = Some(plan.reserve_soc);
-    remember_smart_load_time(&mut memory.night, &ctx.clock, plan.smart_load_on_at.as_deref());
     engine.set_agent_reason(&plan.reason, plan.model.as_deref()).await;
     let recheck_at = now + chrono::Duration::minutes(plan.recheck_minutes as i64);
 
@@ -1673,7 +1707,6 @@ async fn night_verifying(
     let input = build_night_input(ctx, reading, &memory.night, config, soc, average, !config.dry_run);
     match engine.agent.run_night(input).await {
         Ok(plan) => {
-            remember_smart_load_time(&mut memory.night, &ctx.clock, plan.smart_load_on_at.as_deref());
             let plan = clamp_night_plan(plan, standby_reserve(ctx, reading, config));
             apply_on_battery_plan(engine, memory, plan, soc, now, true).await
         }
@@ -1727,7 +1760,6 @@ async fn night_on_battery(
         let input = build_night_input(ctx, reading, &memory.night, config, soc, discharge, !config.dry_run);
         return match engine.agent.run_night(input).await {
             Ok(plan) => {
-                remember_smart_load_time(&mut memory.night, &ctx.clock, plan.smart_load_on_at.as_deref());
                 let plan = clamp_night_plan(plan, standby_reserve(ctx, reading, config));
                 apply_on_battery_plan(engine, memory, plan, soc, now, false).await
             }
@@ -2364,10 +2396,10 @@ fn build_insights(
         },
         grid: Some(reading.grid.clone()),
         smart_load: Some(SmartLoadInsight {
-            season: if is_summer(clock.night()) { "summer" } else { "winter" },
             on: reading.smart_load,
-            planned_on_at: (window == Window::Night).then(|| smart_load_on_time(clock, night)),
-            night_on_at: if window == Window::Night { None } else { Some(clock.night_start_on(clock.now.date())) },
+            trigger_amps: config.smart_load_drain_amps,
+            trigger_minutes: config.smart_load_drain_minutes,
+            drain_a: (window == Window::Night).then(|| night.drain_samples.back().map(|(_, amps)| *amps)).flatten(),
             applied: match memory.window {
                 Some(Window::Day) => memory.day.smart_load_applied,
                 Some(Window::Night) => night.smart_load_applied,
@@ -2560,7 +2592,6 @@ mod tests {
             recheck_minutes: recheck,
             confidence: 0.8,
             reason: format!("{mode} until {reserve}"),
-            smart_load_on_at: Some("22:30".into()),
             model: Some("gemini-3.5-flash-lite".into()),
         })
     }
@@ -3330,47 +3361,120 @@ mod tests {
         assert!(first_hour_drop > second_hour_drop * 1.9, "family still awake uses the measured load first");
     }
 
-    fn in_month(month: u32, day: u32, hour: u32, minute: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, month, day).unwrap().and_hms_opt(hour, minute, 0).unwrap()
+    fn sbg_drain(amps: f64) -> EngineReading {
+        reading(70.0, SBG_MODE, amps * 51.2 * INVERTER_EFFICIENCY)
+    }
+
+    fn outage_drain(amps: f64) -> EngineReading {
+        let mut outage = EngineReading { battery_a: Some(-amps), ..reading(70.0, SOLAR_MODE, 300.0) };
+        outage.grid.on = Some(false);
+        outage
+    }
+
+    fn on_battery() -> EngineMemory {
+        let mut memory = night_memory();
+        memory.night.effective_mode = Some(SBG_MODE);
+        memory
+    }
+
+    async fn drain_minutes(
+        engine: &Engine<'_>,
+        memory: &mut EngineMemory,
+        from: NaiveDateTime,
+        amps: &[f64],
+        read: fn(f64) -> EngineReading,
+    ) -> Option<Duration> {
+        let mut cap = None;
+        for (minute, amps) in amps.iter().enumerate() {
+            cap = apply_smart_load(engine, memory, &read(*amps), &ctx(from + chrono::Duration::minutes(minute as i64))).await;
+        }
+        cap
     }
 
     #[tokio::test]
-    async fn summer_night_turns_smart_load_on_at_night_start() {
+    async fn a_light_winter_night_on_battery_never_turns_smart_load_on() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let mut memory = on_battery();
+        let cap = drain_minutes(&h.engine(&agent), &mut memory, at(26, 21, 0), &[12.0; 60], sbg_drain).await;
+        assert_eq!(memory.night.smart_load_applied, None);
+        assert!(h.notifier.sent.lock().unwrap().is_empty());
+        assert_eq!(cap, Some(SMART_LOAD_POLL), "keeps watching the drain while the battery carries the house");
+    }
+
+    #[tokio::test]
+    async fn ten_minutes_of_heavy_drain_turns_smart_load_on_and_it_stays_on() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let engine = h.engine(&agent);
+        let mut memory = on_battery();
+        drain_minutes(&engine, &mut memory, at(26, 21, 0), &[30.0; 10], sbg_drain).await;
+        assert_eq!(memory.night.smart_load_applied, None, "not before the full 10 minutes");
+
+        drain_minutes(&engine, &mut memory, at(26, 21, 10), &[30.0], sbg_drain).await;
+        assert_eq!(memory.night.smart_load_applied, Some(true));
+        assert!(h.notifier.sent.lock().unwrap()[0].contains("about 30 A for 10 minutes"));
+
+        let cut = EngineReading { smart_load: Some(true), ..sbg_drain(8.0) };
+        let cap = apply_smart_load(&engine, &mut memory, &cut, &ctx(at(26, 23, 0))).await;
+        assert!(cap.is_none());
+        assert_eq!(memory.night.smart_load_applied, Some(true), "the lower drain with heavy loads cut doesn't turn it off");
+        assert_eq!(h.notifier.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_few_minutes_of_oven_does_not_turn_smart_load_on() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let mut memory = on_battery();
+        let mut amps = vec![10.0; 3];
+        amps.extend([70.0; 5]);
+        amps.extend([10.0; 20]);
+        drain_minutes(&h.engine(&agent), &mut memory, at(26, 21, 0), &amps, sbg_drain).await;
+        assert_eq!(memory.night.smart_load_applied, None, "averaged it is 40 A, but only 5 of the 10 minutes were high");
+    }
+
+    #[tokio::test]
+    async fn ac_through_an_outage_turns_smart_load_on() {
         let h = Harness::new(true);
         let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
-        let cap = apply_smart_load(&h.engine(&agent), &mut memory, &reading(80.0, SOLAR_MODE, 300.0), &ctx(in_month(7, 10, 21, 0))).await;
-        assert!(cap.is_none());
-        assert_eq!(memory.night.smart_load_applied, Some(true));
-        assert!(h.notifier.sent.lock().unwrap()[0].contains("enable smart load"));
+        memory.night.effective_mode = Some(SOLAR_MODE);
+        let mut amps = vec![40.0; 11];
+        amps[4] = 15.0;
+        drain_minutes(&h.engine(&agent), &mut memory, at(26, 22, 0), &amps, outage_drain).await;
+        assert_eq!(memory.night.smart_load_applied, Some(true), "a short dip doesn't restart the wait");
     }
 
     #[tokio::test]
-    async fn winter_night_waits_for_the_agents_time_then_turns_on() {
+    async fn on_the_grid_smart_load_is_left_off_and_not_polled() {
         let h = Harness::new(true);
-        let agent = FakeAgent::new(vec![plan("solar", 40.0, 60.0)]);
+        let agent = FakeAgent::new(vec![]);
         let mut memory = night_memory();
-        let engine = h.engine(&agent);
-        night_tick(&engine, &mut memory, &reading(45.0, SOLAR_MODE, 300.0), &ctx(at(26, 21, 0))).await;
-        assert_eq!(memory.night.smart_load_on_at, Some(at(26, 22, 30)));
-
-        let cap = apply_smart_load(&engine, &mut memory, &reading(45.0, SOLAR_MODE, 300.0), &ctx(at(26, 21, 0))).await;
-        assert!(cap.is_some_and(|wait| wait <= Duration::from_secs(90 * 60)));
+        memory.night.effective_mode = Some(SOLAR_MODE);
+        let standby = EngineReading { battery_a: Some(-1.0), ..reading(70.0, SOLAR_MODE, 1500.0) };
+        let cap = apply_smart_load(&h.engine(&agent), &mut memory, &standby, &ctx(at(26, 22, 0))).await;
+        assert!(cap.is_none());
         assert_eq!(memory.night.smart_load_applied, None);
+    }
 
-        apply_smart_load(&engine, &mut memory, &reading(45.0, SOLAR_MODE, 300.0), &ctx(at(26, 22, 31))).await;
-        assert_eq!(memory.night.smart_load_applied, Some(true));
+    #[tokio::test]
+    async fn a_gap_in_the_readings_starts_the_wait_over() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let engine = h.engine(&agent);
+        let mut memory = on_battery();
+        drain_minutes(&engine, &mut memory, at(26, 21, 0), &[30.0; 6], sbg_drain).await;
+        drain_minutes(&engine, &mut memory, at(26, 21, 12), &[30.0; 3], sbg_drain).await;
+        assert_eq!(memory.night.smart_load_applied, None);
     }
 
     #[test]
-    fn winter_smart_load_is_on_by_eleven_at_the_latest() {
-        let c = clock(at(26, 21, 0));
-        let mut night = NightMemory::default();
-        assert_eq!(smart_load_on_time(&c, &night), at(26, 23, 0));
-        night.smart_load_on_at = Some(at(27, 1, 0));
-        assert_eq!(smart_load_on_time(&c, &night), at(26, 23, 0));
-        night.smart_load_on_at = Some(at(26, 19, 0));
-        assert_eq!(smart_load_on_time(&c, &night), at(26, 21, 0));
+    fn the_drain_trigger_can_be_turned_off() {
+        let config = AutomationConfig { smart_load_drain_amps: 0.0, ..AutomationConfig::default() };
+        let samples: VecDeque<_> = (0..=10).map(|minute| (at(26, 21, minute), 60.0)).collect();
+        assert_eq!(sustained_drain(&samples, at(26, 21, 10), &config), None);
+        assert_eq!(sustained_drain(&samples, at(26, 21, 10), &AutomationConfig::default()), Some(60.0));
     }
 
     #[tokio::test]
@@ -3387,13 +3491,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn smart_load_already_in_place_is_not_rewritten() {
+    async fn smart_load_already_on_is_left_alone_at_night() {
         let h = Harness::new(true);
         let agent = FakeAgent::new(vec![]);
-        let mut memory = night_memory();
-        let on = EngineReading { smart_load: Some(true), ..reading(80.0, SOLAR_MODE, 300.0) };
-        apply_smart_load(&h.engine(&agent), &mut memory, &on, &ctx(in_month(6, 10, 21, 30))).await;
-        assert_eq!(memory.night.smart_load_applied, Some(true));
+        let mut memory = on_battery();
+        let on = |amps| EngineReading { smart_load: Some(true), ..sbg_drain(amps) };
+        drain_minutes(&h.engine(&agent), &mut memory, at(26, 21, 0), &[30.0; 15], on).await;
+        assert_eq!(memory.night.smart_load_applied, None);
         assert!(h.notifier.sent.lock().unwrap().is_empty());
     }
 

@@ -14,6 +14,10 @@ pub struct AutomationConfig {
     /// Night-time load (as battery-side amps) that triggers a short oven
     /// boost from the battery. 0 turns it off.
     pub oven_boost_amps: f64,
+    /// Night-time battery drain (amps) that, held for
+    /// `smart_load_drain_minutes`, enables smart load. 0 turns it off.
+    pub smart_load_drain_amps: f64,
+    pub smart_load_drain_minutes: u32,
     pub notifications_enabled: bool,
 }
 
@@ -29,6 +33,8 @@ impl Default for AutomationConfig {
             night_start_hour: 21,
             pv_array_watts: 0.0,
             oven_boost_amps: 50.0,
+            smart_load_drain_amps: 25.0,
+            smart_load_drain_minutes: 10,
             notifications_enabled: true,
         }
     }
@@ -43,6 +49,8 @@ impl AutomationConfig {
         self.night_start_hour = self.night_start_hour.clamp(17, 23);
         self.pv_array_watts = self.pv_array_watts.clamp(0.0, 100_000.0);
         self.oven_boost_amps = self.oven_boost_amps.clamp(0.0, 300.0);
+        self.smart_load_drain_amps = self.smart_load_drain_amps.clamp(0.0, 300.0);
+        self.smart_load_drain_minutes = self.smart_load_drain_minutes.clamp(1, 60);
     }
 }
 

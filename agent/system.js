@@ -13,7 +13,8 @@ Inverter output source — the order in which sources power the house:
 Smart load setting:
 - ON = smart load ENABLED: heavy loads and the connections that aren't on the UPS are cut off. This protects the battery.
 - OFF = smart load DISABLED: nothing is cut; everything runs.
-The controller keeps it disabled by day, enables it at night (right at night start in summer, April to August; at the time you choose between night start and 23:00 the rest of the year), and disables it again near morning once the battery easily lasts until sunrise with everything running.
+It only cuts anything while the battery is powering the house; on grid or solar nothing is cut either way.
+The controller keeps it disabled by day. At night it enables it only when the battery drain stays high for a sustained stretch (for example AC running from the battery on an SBG night or through load-shedding); a short spike like the oven doesn't count, and a light night never turns it on. Once on it stays on until near morning, when the controller disables it once the battery easily lasts until sunrise with everything running.
 
 Battery: a lithium (LFP) pack read directly from its BMS over Bluetooth. Current is positive while charging and negative while discharging. When there is enough sun the inverter can charge it at up to its max charge current, far more than the 10 A or so it often gets. There is a hard floor SOC (20%) the battery must not go below while the grid is on; only a grid outage may take it lower. Even in Solar mode with the grid on, the inverter itself keeps drawing about 1 A from the battery, so after the switch to Solar the battery still drops roughly 1% an hour until the sun is up — the reserve has to cover that, and the prompt gives the lowest reserve that does.
 

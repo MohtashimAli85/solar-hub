@@ -8,9 +8,8 @@ export const NIGHT_SCHEMA = {
     recheck_minutes: { type: "number" },
     confidence: { type: "number" },
     reason: { type: "string" },
-    smart_load_on_at: { type: "string" },
   },
-  required: ["mode", "reserve_soc", "recheck_minutes", "confidence", "reason", "smart_load_on_at"],
+  required: ["mode", "reserve_soc", "recheck_minutes", "confidence", "reason"],
 };
 
 const n = (value, unit = "", digits = 0) =>
@@ -46,10 +45,11 @@ function smartLoadSection(smart) {
   if (!smart) return "";
   const state =
     smart.currently_on == null ? "unknown" : smart.currently_on ? "ON (enabled — heavy loads cut)" : "OFF (disabled — everything running)";
-  if (!smart.choose_on_time) {
-    return `Smart load is currently ${state}. It is ${smart.season}, so the controller enables it at ${smart.earliest} — return "${smart.earliest}" for smart_load_on_at.`;
-  }
-  return `Smart load is currently ${state}. It is ${smart.season}: choose when to enable it tonight (cutting heavy and non-UPS loads), between ${smart.earliest} and ${smart.latest}. Enable it earlier when the battery needs protecting — a warm night with heavy cooling loads, a busy household, a tight reserve, or a long night ahead; later when the night is cool and the battery has room. The controller enables it by ${smart.latest} at the latest.`;
+  const rule =
+    smart.trigger_amps > 0
+      ? `The controller enables it on its own if the battery drain stays at or above ${n(smart.trigger_amps, " A")} for ${smart.trigger_minutes} minutes; short spikes don't count.`
+      : "The controller doesn't enable it at night.";
+  return `Smart load is currently ${state}. ${rule} You don't decide it.`;
 }
 
 function recentNightsSection(nights) {
@@ -137,7 +137,6 @@ Decide:
 - mode: "sbg" to run on battery now (until reserve_soc), or "solar" to stay in Solar mode for now, with the grid powering the house (e.g. SOC is already at or near the reserve you'd want, or it's better to wait).
 - reserve_soc: the SOC at which to switch back to "solar" mode, between ${input.min_reserve_soc} and 95.
 - recheck_minutes: when to look again (15–120). Check sooner when the load is changing (family still awake, no history yet) or the battery is close to the reserve; later when things are steady.
-- smart_load_on_at: "HH:MM" (24-hour) for when smart load should be enabled tonight (heavy loads cut).
 - reason: one or two short sentences naming the factors that drove the reserve (routine, outages, ${input.coming_day}'s sun, season). Refer to that day as "${input.coming_day}". Speak plainly to the homeowner.`;
 }
 
