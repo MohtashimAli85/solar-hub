@@ -6,12 +6,13 @@ pub mod history;
 pub mod insights;
 pub mod runner;
 pub mod telemetry;
+pub mod water;
 pub mod weather;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime};
 use serde::Serialize;
 use tauri::Manager;
 use tokio::sync::{Mutex, Notify};
@@ -19,6 +20,7 @@ use tokio::sync::{Mutex, Notify};
 use config::AutomationConfig;
 use history::HistoryStore;
 use insights::AutomationInsights;
+use water::WaterStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +61,7 @@ pub struct AutomationStatus {
     pub boosts_tonight: u32,
     pub history_nights: u32,
     pub history_dir: String,
+    pub water: WaterStatus,
 }
 
 impl Default for AutomationStatus {
@@ -81,6 +84,7 @@ impl Default for AutomationStatus {
             boosts_tonight: 0,
             history_nights: 0,
             history_dir: String::new(),
+            water: WaterStatus::default(),
         }
     }
 }
@@ -94,10 +98,11 @@ pub struct AutomationState {
     pub wake: Arc<Notify>,
     /// Set by "Check now": the next tick asks the agent even if nothing is due.
     pub force_check: Arc<AtomicBool>,
+    pub water_done_on: Arc<Mutex<Option<NaiveDate>>>,
 }
 
 impl AutomationState {
-    pub fn new(config: AutomationConfig, history: HistoryStore) -> Self {
+    pub fn new(config: AutomationConfig, history: HistoryStore, water_done_on: Option<NaiveDate>) -> Self {
         let status = AutomationStatus {
             enabled: config.enabled,
             dry_run: config.dry_run,
@@ -111,6 +116,7 @@ impl AutomationState {
             history,
             wake: Arc::new(Notify::new()),
             force_check: Arc::new(AtomicBool::new(false)),
+            water_done_on: Arc::new(Mutex::new(water_done_on)),
         }
     }
 
@@ -133,6 +139,10 @@ impl AutomationState {
     pub async fn set_status(&self, update: impl FnOnce(&mut AutomationStatus)) {
         let mut status = self.status.lock().await;
         update(&mut status);
+    }
+
+    pub async fn water_done_on(&self) -> Option<NaiveDate> {
+        *self.water_done_on.lock().await
     }
 
     pub async fn notify_event(&self, message: impl Into<String>) {

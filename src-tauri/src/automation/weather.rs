@@ -6,7 +6,7 @@ use crate::automation::history::DaySolar;
 
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
 const MJ_PER_KWH: f64 = 3.6;
-const PERFORMANCE_RATIO: f64 = 0.75;
+pub const PERFORMANCE_RATIO: f64 = 0.75;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HourWeather {

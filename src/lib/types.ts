@@ -86,6 +86,23 @@ export interface AutomationConfig {
   smart_load_drain_amps: number;
   smart_load_drain_minutes: number;
   notifications_enabled: boolean;
+  water_reminder_enabled: boolean;
+  water_motor_watts: number;
+  water_start_hour: number;
+  water_end_hour: number;
+  water_full_soc: number;
+  water_cloudy_hour: number;
+  water_cloudy_soc: number;
+  water_repeat_minutes: number;
+}
+
+export type WaterPhase = "off" | "waiting" | "ready" | "done" | "missed";
+
+export interface WaterStatus {
+  phase: WaterPhase;
+  note: string | null;
+  spare_w: number | null;
+  last_reminded_at: LocalDateTime | null;
 }
 
 export interface AutomationLastEvent {
@@ -121,6 +138,7 @@ export interface AutomationStatus {
   boosts_tonight: number;
   history_nights: number;
   history_dir: string;
+  water: WaterStatus;
 }
 
 /** Local wall-clock time without a zone, e.g. "2026-09-26T21:05:00". */

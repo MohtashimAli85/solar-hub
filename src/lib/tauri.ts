@@ -103,6 +103,8 @@ export const getAutomationDecisions = (limit: number) =>
 export const openRecordsFolder = () => invoke<void>("open_records_folder");
 
 export const sendTestNotification = () => invoke<void>("send_test_notification");
+
+export const markWaterDone = () => invoke<AutomationStatus>("mark_water_done");
 export const getEnergySummary = () => invoke<EnergySummary>("get_energy_summary");
 
 export const setBillReading = (day: number, time: string) =>

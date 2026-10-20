@@ -8,6 +8,7 @@ import { RoutineCard } from "@/components/automation/RoutineCard";
 import { Skeleton } from "@/components/automation/shared";
 import { TodayCard } from "@/components/automation/TodayCard";
 import { TonightCard } from "@/components/automation/TonightCard";
+import { WaterTankSettings } from "@/components/automation/WaterTankSettings";
 import { WeatherCard } from "@/components/automation/WeatherCard";
 import { useAutomation } from "@/hooks/useAutomation";
 
@@ -94,6 +95,12 @@ export function AutomationPage({ onOpenSettings }: { onOpenSettings: () => void 
             testing={automation.testNotification.isPending}
             onSave={(next) => automation.saveConfig.mutate(next)}
             onTestNotification={() => automation.testNotification.mutate()}
+          />
+
+          <WaterTankSettings
+            config={config}
+            saving={automation.saveConfig.isPending}
+            onSave={(next) => automation.saveConfig.mutate(next)}
           />
         </>
       )}

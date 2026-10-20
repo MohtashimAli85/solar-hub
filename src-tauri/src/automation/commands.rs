@@ -57,6 +57,21 @@ pub async fn open_records_folder(app: AppHandle, state: State<'_, AutomationStat
 }
 
 #[tauri::command]
+pub async fn mark_water_done(app: AppHandle, state: State<'_, AutomationState>) -> Result<AutomationStatus, String> {
+    let today = chrono::Local::now().date_naive();
+    crate::storage::save_water_done_on(&app, today)?;
+    *state.water_done_on.lock().await = Some(today);
+    state
+        .set_status(|status| {
+            status.water.phase = super::water::WaterPhase::Done;
+            status.water.note = None;
+        })
+        .await;
+    state.wake.notify_one();
+    Ok(state.status().await)
+}
+
+#[tauri::command]
 pub async fn send_test_notification(notifier: State<'_, Notifier>) -> Result<(), String> {
     notifier.send_test(
         "Solar Hub",

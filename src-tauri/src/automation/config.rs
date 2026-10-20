@@ -19,6 +19,14 @@ pub struct AutomationConfig {
     pub smart_load_drain_amps: f64,
     pub smart_load_drain_minutes: u32,
     pub notifications_enabled: bool,
+    pub water_reminder_enabled: bool,
+    pub water_motor_watts: f64,
+    pub water_start_hour: u32,
+    pub water_end_hour: u32,
+    pub water_full_soc: f64,
+    pub water_cloudy_hour: u32,
+    pub water_cloudy_soc: f64,
+    pub water_repeat_minutes: u32,
 }
 
 impl Default for AutomationConfig {
@@ -36,6 +44,14 @@ impl Default for AutomationConfig {
             smart_load_drain_amps: 25.0,
             smart_load_drain_minutes: 10,
             notifications_enabled: true,
+            water_reminder_enabled: true,
+            water_motor_watts: 1000.0,
+            water_start_hour: 11,
+            water_end_hour: 15,
+            water_full_soc: 100.0,
+            water_cloudy_hour: 14,
+            water_cloudy_soc: 80.0,
+            water_repeat_minutes: 15,
         }
     }
 }
@@ -51,6 +67,13 @@ impl AutomationConfig {
         self.oven_boost_amps = self.oven_boost_amps.clamp(0.0, 300.0);
         self.smart_load_drain_amps = self.smart_load_drain_amps.clamp(0.0, 300.0);
         self.smart_load_drain_minutes = self.smart_load_drain_minutes.clamp(1, 60);
+        self.water_motor_watts = self.water_motor_watts.clamp(100.0, 10_000.0);
+        self.water_start_hour = self.water_start_hour.clamp(6, 17);
+        self.water_end_hour = self.water_end_hour.clamp(self.water_start_hour + 1, 18);
+        self.water_cloudy_hour = self.water_cloudy_hour.clamp(self.water_start_hour, self.water_end_hour - 1);
+        self.water_full_soc = self.water_full_soc.clamp(0.0, 100.0);
+        self.water_cloudy_soc = self.water_cloudy_soc.clamp(0.0, 100.0);
+        self.water_repeat_minutes = self.water_repeat_minutes.clamp(5, 120);
     }
 }
 

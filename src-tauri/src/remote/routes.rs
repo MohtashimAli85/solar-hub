@@ -166,6 +166,7 @@ async fn dispatch(app: &AppHandle, command: &str, args: &Value) -> Result<Option
         "force_automation_check" => to_json(auto::force_automation_check(app.state()).await),
         "get_automation_insights" => to_json(auto::get_automation_insights(app.state()).await),
         "get_automation_decisions" => to_json(auto::get_automation_decisions(app.state(), arg(args, "limit")?).await),
+        "mark_water_done" => to_json(auto::mark_water_done(app.clone(), app.state()).await),
 
         "get_energy_summary" => to_json(en::get_energy_summary(app.state()).await),
         "set_bill_reading" => to_json(en::set_bill_reading(app.clone(), app.state(), arg(args, "day")?, arg(args, "time")?).await),

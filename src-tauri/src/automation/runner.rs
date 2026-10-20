@@ -17,6 +17,7 @@ use crate::automation::telemetry::{
     estimate_discharge_a, first_at_or_below, project_day, soc_per_ah, soc_per_hour_at, soc_trajectory, DayProjection,
     DayProjectionInput, EngineReading, SocPoint,
 };
+use crate::automation::water::{self, WaterInput, WaterMemory};
 use crate::automation::weather::{self, Forecast, SummaryInput, WeatherSummary};
 use crate::automation::{AutomationState, Phase};
 use crate::battery::BatteryState;
@@ -601,6 +602,7 @@ pub struct EngineMemory {
     dry_run: Option<bool>,
     started_at: Option<Instant>,
     read_failures: usize,
+    water: WaterMemory,
 }
 
 impl EngineMemory {
@@ -867,7 +869,36 @@ async fn tick(
 
     sync_plan_status(&engine, memory, &ctx).await;
     state.set_insights(build_insights(state, config, memory, &reading, &ctx)).await;
-    sleep_for
+    let water_next = water_reminder(state, services.notifier, memory, &reading, &ctx, config).await;
+    until(now, water_next, sleep_for)
+}
+
+async fn water_reminder(
+    state: &AutomationState,
+    notifier: &dyn NotificationSink,
+    memory: &mut EngineMemory,
+    reading: &EngineReading,
+    ctx: &Context,
+    config: &AutomationConfig,
+) -> Option<NaiveDateTime> {
+    let done_on = state.water_done_on().await;
+    let step = water::step(
+        &mut memory.water,
+        &WaterInput {
+            now: ctx.clock.now,
+            soc: reading.soc,
+            pv_w: reading.pv_w,
+            load_w: reading.load_w,
+            forecast: ctx.forecast.as_ref(),
+            config,
+            done_on,
+        },
+    );
+    if let Some(body) = &step.notify {
+        notifier.send(water::TITLE, body);
+    }
+    state.set_status(|status| status.water = step.status).await;
+    step.next_at
 }
 
 async fn idle(engine: &Engine<'_>, memory: &mut EngineMemory) -> Duration {
@@ -2532,7 +2563,7 @@ mod tests {
             };
             let dir = std::env::temp_dir().join(format!("solar-hub-runner-{}", uuid::Uuid::new_v4()));
             Self {
-                state: AutomationState::new(config.clone(), HistoryStore::new(dir.clone())),
+                state: AutomationState::new(config.clone(), HistoryStore::new(dir.clone()), None),
                 client: SolarClient::new(SolarCredentials::default()),
                 notifier: FakeNotifier::default(),
                 config,

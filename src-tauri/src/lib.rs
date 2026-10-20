@@ -4,7 +4,7 @@ use inverter::client::{SolarClient, SolarCredentials};
 use inverter::InverterState;
 use state::AppState;
 use tauri::Manager;
-use storage::{get_solar_password, load_app_settings, load_automation_config, load_energy_config, load_remote_config};
+use storage::{get_solar_password, load_app_settings, load_automation_config, load_energy_config, load_remote_config, load_water_done_on};
 use tracing_appender::non_blocking::WorkerGuard;
 
 pub mod automation;
@@ -84,7 +84,7 @@ pub fn run() {
                 .join("Solar Hub");
             let history = automation::history::HistoryStore::new(records_root);
             let energy = energy::EnergyState::new(load_energy_config(&handle), history.clone());
-            let automation = AutomationState::new(automation_config, history);
+            let automation = AutomationState::new(automation_config, history, load_water_done_on(&handle));
 
             app.manage(inverter.clone());
             app.manage(battery.clone());
@@ -144,6 +144,7 @@ pub fn run() {
             automation::commands::get_automation_insights,
             automation::commands::get_automation_decisions,
             automation::commands::open_records_folder,
+            automation::commands::mark_water_done,
             automation::commands::send_test_notification,
             energy::commands::get_energy_summary,
             energy::commands::set_bill_reading,

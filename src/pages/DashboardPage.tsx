@@ -2,6 +2,7 @@ import { AutomationSummaryCard } from "@/components/dashboard/AutomationSummaryC
 import { CommandHero } from "@/components/dashboard/CommandHero";
 import { BillCard } from "@/components/dashboard/BillCard";
 import { UnitsCard } from "@/components/dashboard/UnitsCard";
+import { WaterTankCard } from "@/components/dashboard/WaterTankCard";
 import { OutputSourcePanel } from "@/components/inverter/OutputSourcePanel";
 import { useAutomation } from "@/hooks/useAutomation";
 import { useBatteryDevice } from "@/hooks/useBatteryDevice";
@@ -50,6 +51,12 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
           <AutomationSummaryCard status={automation.status} onOpen={onOpenAutomation} />
         </div>
       </div>
+
+      <WaterTankCard
+        water={automation.status?.water}
+        pending={automation.waterDone.isPending}
+        onDone={() => automation.waterDone.mutate()}
+      />
 
       <UnitsCard />
 

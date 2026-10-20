@@ -81,6 +81,21 @@ pub fn save_automation_config(app: &AppHandle, config: &AutomationConfig) -> Res
     store.save().map_err(|error| error.to_string())
 }
 
+pub fn load_water_done_on(app: &AppHandle) -> Option<chrono::NaiveDate> {
+    app.store(AUTOMATION_STORE)
+        .ok()
+        .and_then(|store| store.get("water_done_on"))
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+pub fn save_water_done_on(app: &AppHandle, date: chrono::NaiveDate) -> Result<(), String> {
+    let store = app
+        .store(AUTOMATION_STORE)
+        .map_err(|error| error.to_string())?;
+    store.set("water_done_on", json!(date));
+    store.save().map_err(|error| error.to_string())
+}
+
 pub fn load_energy_config(app: &AppHandle) -> EnergyConfig {
     app.store(SETTINGS_STORE)
         .ok()

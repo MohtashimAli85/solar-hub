@@ -7,6 +7,7 @@ import {
   getAutomationDecisions,
   getAutomationInsights,
   getAutomationStatus,
+  markWaterDone,
   openRecordsFolder,
   sendTestNotification,
   updateAutomationConfig,
@@ -88,6 +89,10 @@ export function useAutomation({ withInsights = false, decisionLimit = 0 } = {}) 
   const checking = checkNow.isPending || (checkRequestedAt != null && lastStatusEventAt < checkRequestedAt);
   const testNotification = useMutation({ mutationFn: sendTestNotification });
   const openFolder = useMutation({ mutationFn: openRecordsFolder });
+  const waterDone = useMutation({
+    mutationFn: markWaterDone,
+    onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
+  });
 
   return {
     status: statusQuery.data,
@@ -100,5 +105,6 @@ export function useAutomation({ withInsights = false, decisionLimit = 0 } = {}) 
     checking,
     testNotification,
     openFolder,
+    waterDone,
   };
 }
