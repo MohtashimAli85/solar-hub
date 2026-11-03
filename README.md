@@ -243,6 +243,12 @@ hand, the app leaves it alone until the target changes again.
   off. Switching back to Solar is always allowed.
 - After three failed AI calls in a row while on battery, it switches back to
   grid rather than running the battery unattended.
+- If the BMS drops out at night, the battery % is estimated from the last BMS
+  reading: on battery it drains at house load ÷ battery volts, scaled by how
+  much more the BMS has measured than that over the last week (about 1.1×);
+  in Solar mode it drains at the standby draw. The estimate still enforces the
+  reserve and the floor, but it never starts the battery. You get one
+  notification when it takes over, and switches made on it say so.
 
 ### Grid detection
 

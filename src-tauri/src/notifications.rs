@@ -90,6 +90,21 @@ const RULES: &[Rule] = &[
         },
     },
     Rule {
+        key: "battery_90",
+        title: "Battery at 90%",
+        fires: |reading| match (reading.soc, reading.current_a) {
+            (Some(soc), Some(current)) => Some(soc <= 90.0 && current < 0.0),
+            _ => None,
+        },
+        clears: |reading| reading.soc.map(|soc| soc >= 95.0),
+        body: |reading| {
+            format!(
+                "Battery down to {:.0}% and discharging.",
+                reading.soc.unwrap_or(0.0)
+            )
+        },
+    },
+    Rule {
         key: "half_battery",
         title: "Half battery",
         fires: |reading| match (reading.soc, reading.current_a) {

@@ -28,6 +28,11 @@ use crate::storage::AppSettings;
 
 const SBG_MODE: u32 = 1;
 const SOLAR_MODE: u32 = 0;
+const STUCK_SBG_SHORTFALL_W: f64 = 300.0;
+const STUCK_SBG_MINUTES: i64 = 3;
+const STUCK_SBG_COOLDOWN: Duration = Duration::from_secs(600);
+const STUCK_SBG_SETTLE: Duration = Duration::from_secs(5);
+const STUCK_SBG_WRITE_TRIES: usize = 3;
 const VERIFY_SETTLE: chrono::Duration = chrono::Duration::seconds(150);
 const VERIFY_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 const VERIFY_SAMPLES_NEEDED: usize = 5;
@@ -39,6 +44,8 @@ const NEAR_FLOOR_MARGIN: f64 = 3.0;
 /// In Solar mode the inverter still draws about this much from the battery
 /// until enough samples say otherwise; the reserve covers it until sunrise.
 const STANDBY_DRAIN_FALLBACK_A: f64 = 1.0;
+const DRAW_RATIO_FALLBACK: f64 = 1.1;
+const DRAW_RATIO_RANGE: (f64, f64) = (1.0, 1.5);
 const MAX_AI_FAILURES: u32 = 3;
 const AI_RETRY_MINUTES: i64 = 15;
 const SAMPLE_EVERY: Duration = Duration::from_secs(290);
@@ -58,7 +65,7 @@ const MAX_RECHECK_MINUTES: f64 = 120.0;
 const MAX_RESERVE_SOC: f64 = 95.0;
 const HISTORY_NIGHTS: usize = 7;
 const RECENT_DAYS: i64 = 7;
-const NOMINAL_PACK_VOLTS: f64 = 51.2;
+const NOMINAL_PACK_VOLTS: f64 = 25.6;
 const INVERTER_EFFICIENCY: f64 = 0.9;
 /// Smart load goes on once the battery drain has been at or above its
 /// trigger for this share of the window, so a few minutes of oven or kettle
@@ -278,6 +285,7 @@ struct Context {
     forecast: Option<Forecast>,
     weather: Option<WeatherSummary>,
     standby_drain_a: f64,
+    draw_ratio: f64,
 }
 
 impl Context {
@@ -289,6 +297,9 @@ impl Context {
         let outcomes = history::night_outcomes(&samples, clock.night(), HISTORY_NIGHTS);
         let standby_drain_a = history::standby_drain_a(&samples, clock.now - chrono::Duration::days(RECENT_DAYS))
             .unwrap_or(STANDBY_DRAIN_FALLBACK_A);
+        let draw_ratio = history::draw_ratio(&samples, clock.now - chrono::Duration::days(RECENT_DAYS))
+            .unwrap_or(DRAW_RATIO_FALLBACK)
+            .clamp(DRAW_RATIO_RANGE.0, DRAW_RATIO_RANGE.1);
         let weather = forecast.as_ref().map(|forecast| {
             weather::summarize(
                 forecast,
@@ -314,6 +325,7 @@ impl Context {
             forecast,
             weather,
             standby_drain_a,
+            draw_ratio,
         }
     }
 }
@@ -484,6 +496,9 @@ struct NightMemory {
     effective_mode: Option<u32>,
     sim_soc: Option<f64>,
     sim_updated_at: Option<NaiveDateTime>,
+    est_soc: Option<f64>,
+    est_updated_at: Option<NaiveDateTime>,
+    est_notified: bool,
     plan: Option<ActivePlan>,
     next_check_at: Option<NaiveDateTime>,
     on_battery_since: Option<NaiveDateTime>,
@@ -516,6 +531,9 @@ impl Default for NightMemory {
             effective_mode: None,
             sim_soc: None,
             sim_updated_at: None,
+            est_soc: None,
+            est_updated_at: None,
+            est_notified: false,
             plan: None,
             next_check_at: None,
             on_battery_since: None,
@@ -603,6 +621,8 @@ pub struct EngineMemory {
     started_at: Option<Instant>,
     read_failures: usize,
     water: WaterMemory,
+    stuck_sbg_since: Option<Instant>,
+    last_sbg_kick_at: Option<Instant>,
 }
 
 impl EngineMemory {
@@ -861,7 +881,11 @@ async fn tick(
             Window::Night => night_tick(&engine, memory, &reading, &ctx).await,
             Window::Day => day_tick(&engine, memory, &reading, &ctx).await,
         };
-        match apply_smart_load(&engine, memory, &reading, &ctx).await {
+        let sleep_for = match apply_smart_load(&engine, memory, &reading, &ctx).await {
+            Some(cap) => sleep_for.min(cap),
+            None => sleep_for,
+        };
+        match recover_stuck_sbg(&engine, memory, &reading).await {
             Some(cap) => sleep_for.min(cap),
             None => sleep_for,
         }
@@ -1144,13 +1168,46 @@ fn update_sim_soc(night: &mut NightMemory, reading: &EngineReading, dry_run: boo
     }
 }
 
+/// The BMS link drops for hours on some nights; carry its last SOC forward on
+/// the draw the house load implies, so the reserve and floor still hold.
+fn update_est_soc(night: &mut NightMemory, reading: &EngineReading, ctx: &Context, now: NaiveDateTime) {
+    if reading.soc.is_some() {
+        night.est_soc = reading.soc;
+        night.est_updated_at = Some(now);
+        return;
+    }
+    let (Some(soc), Some(last)) = (night.est_soc, night.est_updated_at) else {
+        return;
+    };
+    let on_battery = reading.mode.or(night.effective_mode) == Some(SBG_MODE) || reading.grid_on() == Some(false);
+    let amps = if on_battery {
+        match estimate_discharge_a(reading.load_w, reading.pv_w, reading.batt_v) {
+            Some(amps) => amps * ctx.draw_ratio,
+            None => return,
+        }
+    } else {
+        ctx.standby_drain_a
+    };
+    let hours = (now - last).num_seconds().max(0) as f64 / 3600.0;
+    night.est_soc = Some((soc - amps * hours * soc_per_ah(reading.rated_capacity_ah)).max(0.0));
+    night.est_updated_at = Some(now);
+}
+
 /// While dry run pretends to be on battery, the real pack isn't draining, so
 /// decisions use the simulated SOC instead.
 fn night_soc(night: &NightMemory, reading: &EngineReading, dry_run: bool) -> Option<f64> {
     if dry_run && night.effective_mode == Some(SBG_MODE) {
         night.sim_soc.or(reading.soc)
     } else {
-        reading.soc
+        reading.soc.or(night.est_soc)
+    }
+}
+
+fn night_discharge_a(reading: &EngineReading, dry_run: bool) -> f64 {
+    if dry_run || reading.battery_a.is_none() {
+        estimate_discharge_a(reading.load_w, reading.pv_w, reading.batt_v).unwrap_or(reading.discharge_a)
+    } else {
+        reading.discharge_a
     }
 }
 
@@ -1367,7 +1424,19 @@ async fn night_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
         memory.night.effective_mode = reading.mode;
     }
     update_sim_soc(&mut memory.night, reading, config.dry_run, now);
+    update_est_soc(&mut memory.night, reading, ctx, now);
     let soc = night_soc(&memory.night, reading, config.dry_run);
+    if reading.soc.is_none() && !memory.night.est_notified {
+        if let Some(estimate) = memory.night.est_soc {
+            memory.night.est_notified = true;
+            engine
+                .notify_info(&format!(
+                    "Battery monitor disconnected — estimating the charge from the house load (about {})",
+                    fmt_pct(estimate)
+                ))
+                .await;
+        }
+    }
 
     let interrupted = guardrails::below_floor(soc, config.min_soc_percent)
         || guardrails::user_took_over(reading.mode, memory.night.last_written_mode, config.dry_run);
@@ -1403,7 +1472,7 @@ async fn night_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
         return normal_interval(config);
     }
     if !config.dry_run {
-        memory.night.effective_mode = reading.mode;
+        memory.night.effective_mode = reading.mode.or(memory.night.effective_mode);
     }
 
     if let Some(wait) = oven_boost(engine, memory, reading, ctx, soc).await {
@@ -1411,7 +1480,10 @@ async fn night_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
     }
 
     let sleep_for = match memory.night.phase {
-        NightPhase::Deciding => night_deciding(engine, memory, reading, ctx, soc).await,
+        NightPhase::Deciding => {
+            let measured = soc.filter(|_| reading.soc.is_some());
+            night_deciding(engine, memory, reading, ctx, measured).await
+        }
         NightPhase::Verifying => night_verifying(engine, memory, reading, ctx, soc).await,
         NightPhase::OnBattery => night_on_battery(engine, memory, reading, ctx, soc).await,
         NightPhase::ReserveKept => {
@@ -1722,12 +1794,7 @@ async fn night_verifying(
     if now - started < VERIFY_SETTLE {
         return FAST_TICK;
     }
-    let sample = if config.dry_run {
-        estimate_discharge_a(reading.load_w, reading.pv_w, reading.batt_v).unwrap_or(0.0)
-    } else {
-        reading.discharge_a
-    };
-    memory.night.verify_samples.push(sample);
+    memory.night.verify_samples.push(night_discharge_a(reading, config.dry_run));
     if memory.night.verify_samples.len() < VERIFY_SAMPLES_NEEDED {
         return VERIFY_SAMPLE_INTERVAL;
     }
@@ -1771,6 +1838,11 @@ async fn night_on_battery(
                 fmt_pct(config.min_soc_percent)
             )
         };
+        let reason = if reading.soc.is_none() {
+            format!("{reason} The battery monitor is offline, so the charge is estimated from the house load.")
+        } else {
+            reason
+        };
         if !revert_to_solar(engine, &mut memory.night, &format!("switch to Solar — {}", reason.to_lowercase())).await {
             return normal_interval(config);
         }
@@ -1783,11 +1855,7 @@ async fn night_on_battery(
     }
 
     if memory.night.next_check_at.is_none_or(|next| now >= next) {
-        let discharge = if config.dry_run {
-            estimate_discharge_a(reading.load_w, reading.pv_w, reading.batt_v).unwrap_or(reading.discharge_a)
-        } else {
-            reading.discharge_a
-        };
+        let discharge = night_discharge_a(reading, config.dry_run);
         let input = build_night_input(ctx, reading, &memory.night, config, soc, discharge, !config.dry_run);
         return match engine.agent.run_night(input).await {
             Ok(plan) => {
@@ -1914,6 +1982,49 @@ fn draining_on_sbg(reading: &EngineReading) -> bool {
     }
 }
 
+fn sbg_not_draining(reading: &EngineReading) -> bool {
+    reading.source == "inverter"
+        && reading.mode == Some(SBG_MODE)
+        && reading.grid_on() == Some(true)
+        && match (reading.load_w, reading.pv_w, reading.battery_a) {
+            (Some(load), Some(pv), Some(amps)) => load - pv >= STUCK_SBG_SHORTFALL_W && amps > -DAY_DRAIN_A,
+            _ => false,
+        }
+}
+
+/// The inverter sometimes sits on SBG without covering the shortfall from the
+/// battery; switching to Solar and back to SBG makes it re-apply the setting.
+async fn recover_stuck_sbg(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &EngineReading) -> Option<Duration> {
+    if engine.config.dry_run || !sbg_not_draining(reading) {
+        memory.stuck_sbg_since = None;
+        return None;
+    }
+    let since = *memory.stuck_sbg_since.get_or_insert_with(Instant::now);
+    if memory.last_sbg_kick_at.is_some_and(|at| at.elapsed() < STUCK_SBG_COOLDOWN) {
+        return None;
+    }
+    if since.elapsed() < Duration::from_secs(STUCK_SBG_MINUTES as u64 * 60) {
+        return Some(FAST_TICK);
+    }
+    memory.stuck_sbg_since = None;
+    memory.last_sbg_kick_at = Some(Instant::now());
+    if !engine.write_mode(SOLAR_MODE).await {
+        return None;
+    }
+    tokio::time::sleep(STUCK_SBG_SETTLE).await;
+    for _ in 0..STUCK_SBG_WRITE_TRIES {
+        if engine.write_mode(SBG_MODE).await {
+            engine
+                .notify_info("The battery wasn't covering the house on SBG — switched to Solar and back to SBG to reset the inverter")
+                .await;
+            return Some(FAST_TICK);
+        }
+        tokio::time::sleep(STUCK_SBG_SETTLE).await;
+    }
+    engine.notify_info("Could not switch the inverter back to SBG after resetting it — set SBG by hand").await;
+    None
+}
+
 fn sun_is_done(ctx: &Context, reading: &EngineReading) -> bool {
     let now = ctx.clock.now;
     let sunset = ctx.clock.sunset_today;
@@ -2009,7 +2120,7 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
         return normal_interval(config);
     }
     if day.effective_mode.is_none() || !config.dry_run {
-        day.effective_mode = reading.mode;
+        day.effective_mode = reading.mode.or(day.effective_mode);
     }
     engine.set_phase(Phase::Day).await;
 
@@ -2862,6 +2973,41 @@ mod tests {
         let drained = 60.0 - memory.night.sim_soc.unwrap();
         assert!((drained - 10.0).abs() < 1e-6, "512 W·0.9 / 51.2 V / 0.9 = 10 A = 10%/h, drained {drained}");
         assert_eq!(memory.night.phase, NightPhase::OnBattery);
+    }
+
+    fn without_bms(mode: u32, load_w: f64) -> EngineReading {
+        EngineReading { soc: None, battery_a: None, source: "inverter", ..reading(0.0, mode, load_w) }
+    }
+
+    #[test]
+    fn estimate_carries_the_last_bms_soc_through_a_dropout() {
+        let context = ctx(at(27, 1, 0));
+        let mut night = NightMemory::default();
+        update_est_soc(&mut night, &reading(33.0, SBG_MODE, 460.8), &context, at(27, 0, 0));
+        update_est_soc(&mut night, &without_bms(SBG_MODE, 460.8), &context, at(27, 1, 0));
+        assert!((night.est_soc.unwrap() - 22.0).abs() < 1e-6, "10 A from the load × 1.1 = 11%/h");
+
+        update_est_soc(&mut night, &without_bms(SOLAR_MODE, 460.8), &context, at(27, 2, 0));
+        assert!((night.est_soc.unwrap() - 21.0).abs() < 1e-6, "Solar mode only loses the 1 A standby draw");
+        assert_eq!(night_soc(&night, &without_bms(SOLAR_MODE, 460.8), false), Some(night.est_soc.unwrap()));
+
+        update_est_soc(&mut night, &reading(25.0, SOLAR_MODE, 460.8), &context, at(27, 3, 0));
+        assert_eq!(night.est_soc, Some(25.0), "a BMS reading replaces the estimate");
+    }
+
+    #[tokio::test]
+    async fn an_estimated_soc_never_starts_the_battery() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![plan("sbg", 30.0, 60.0)]);
+        let mut memory = night_memory();
+        memory.night.effective_mode = Some(SOLAR_MODE);
+        memory.night.est_soc = Some(90.0);
+        memory.night.est_updated_at = Some(at(26, 22, 0));
+        night_tick(&h.engine(&agent), &mut memory, &without_bms(SOLAR_MODE, 300.0), &ctx(at(26, 22, 5))).await;
+
+        assert_eq!(agent.night_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(memory.night.phase, NightPhase::Deciding);
+        assert!(h.notifier.sent.lock().unwrap()[0].contains("Battery monitor disconnected"));
     }
 
     #[tokio::test]

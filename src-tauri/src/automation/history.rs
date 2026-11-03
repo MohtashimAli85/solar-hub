@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use serde::Serialize;
 
+use crate::automation::telemetry::estimate_discharge_a;
+
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const SAMPLE_HEADER: &str = "timestamp,soc_pct,load_w,pv_w,battery_a,battery_v,grid_on,grid_basis,mode,source";
 const DECISION_HEADER: &str = "timestamp,window,mode,reserve_soc,recheck_minutes,confidence,dry_run,applied,reason,model";
@@ -449,6 +451,25 @@ pub fn standby_drain_a(samples: &[Sample], since: NaiveDateTime) -> Option<f64> 
     median(&mut draws)
 }
 
+/// How much more the BMS sees leaving the battery on SBG in the dark than the
+/// house load implies, so a load-based estimate can stand in when it drops out.
+pub fn draw_ratio(samples: &[Sample], since: NaiveDateTime) -> Option<f64> {
+    let mut ratios: Vec<f64> = samples
+        .iter()
+        .filter(|s| s.at >= since && s.mode.as_deref() == Some("SBG"))
+        .filter(|s| s.pv_w.is_some_and(|pv| pv < STANDBY_DARK_PV_W))
+        .filter_map(|s| {
+            let measured = -s.battery_a?;
+            let estimated = estimate_discharge_a(s.load_w, s.pv_w, s.battery_v)?;
+            (measured >= ON_BATTERY_A && estimated >= ON_BATTERY_A).then(|| measured / estimated)
+        })
+        .collect();
+    if ratios.len() < STANDBY_MIN_SAMPLES {
+        return None;
+    }
+    median(&mut ratios)
+}
+
 fn minutes_between(start: NaiveDateTime, end: NaiveDateTime) -> f64 {
     (end - start).num_seconds() as f64 / 60.0
 }
@@ -691,6 +712,21 @@ mod tests {
 
         assert!((standby_drain_a(&samples, at(20, 0, 0)).unwrap() - 0.915).abs() < 1e-9);
         assert_eq!(standby_drain_a(&samples[..5], at(20, 0, 0)), None, "too few samples to trust");
+    }
+
+    #[test]
+    fn draw_ratio_compares_bms_current_with_the_load_on_sbg_in_the_dark() {
+        let sbg = |minute: u32, amps: f64| Sample {
+            mode: Some("SBG".into()),
+            battery_a: Some(amps),
+            ..sample(at(20, 2, minute), 230.4, 40.0, Some(true))
+        };
+        let mut samples: Vec<Sample> = [-5.5, -5.4, -5.6, -5.5, -5.5, -5.7].iter().enumerate().map(|(i, a)| sbg(i as u32, *a)).collect();
+        samples.push(sample(at(20, 2, 30), 230.4, 40.0, Some(true)));
+        samples.push(Sample { pv_w: Some(800.0), ..sbg(40, -0.5) });
+
+        assert!((draw_ratio(&samples, at(20, 0, 0)).unwrap() - 1.1).abs() < 1e-9);
+        assert_eq!(draw_ratio(&samples[..5], at(20, 0, 0)), None, "too few samples to trust");
     }
 
     #[test]
