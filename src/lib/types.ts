@@ -94,6 +94,22 @@ export interface AutomationConfig {
   water_cloudy_hour: number;
   water_cloudy_soc: number;
   water_repeat_minutes: number;
+  water_run_minutes: number;
+  geyser_enabled: boolean;
+  geyser_low_watts: number;
+  geyser_high_watts: number;
+  geyser_daily_kwh: number;
+  geyser_start_hour: number;
+  geyser_end_hour: number;
+  geyser_esp32_host: string;
+  geyser_auto_control: boolean;
+  ev_enabled: boolean;
+  ev_battery_kwh: number;
+  ev_charger_watts: number;
+  ev_daily_use_pct: number;
+  ev_ble_name: string;
+  ev_ble_mac: string;
+  ev_power_cycle_reads: boolean;
 }
 
 export type WaterPhase = "off" | "waiting" | "ready" | "done" | "missed";
@@ -103,6 +119,91 @@ export interface WaterStatus {
   note: string | null;
   spare_w: number | null;
   last_reminded_at: LocalDateTime | null;
+}
+
+export type LoadKind = "water" | "geyser" | "ev";
+
+export type LoadPhase = "off" | "waiting" | "ready" | "running" | "stop" | "done" | "skipped";
+
+export interface LoadRow {
+  phase: LoadPhase;
+  note: string | null;
+  watts: number | null;
+  from: LocalDateTime | null;
+  until: LocalDateTime | null;
+  running_w: number | null;
+  running_since: LocalDateTime | null;
+  last_reminded_at: LocalDateTime | null;
+}
+
+export interface GeyserStatus extends LoadRow {
+  delivered_kwh: number;
+  need_kwh: number;
+  heated_at: LocalDateTime | null;
+  auto: boolean;
+}
+
+export type SocBasis = "read" | "live" | "estimated" | "full";
+
+export type EvCharge = "yes" | "if_spare" | "no";
+
+export interface EvStatus extends LoadRow {
+  soc: number | null;
+  soc_at: LocalDateTime | null;
+  soc_basis: SocBasis | null;
+  hours_to_full: number | null;
+  decision: EvCharge | null;
+  decision_reason: string | null;
+  decision_model: string | null;
+  reading: boolean;
+  read_error: string | null;
+}
+
+export interface LoadSlot {
+  kind: LoadKind;
+  start: LocalDateTime;
+  end: LocalDateTime;
+  watts: number;
+  partial: boolean;
+}
+
+export interface LoadsStatus {
+  geyser: GeyserStatus;
+  ev: EvStatus;
+  water_running_since: LocalDateTime | null;
+  spare_kwh: number | null;
+  sunset_target_soc: number | null;
+  projected_sunset_soc: number | null;
+  pv_ratio: number | null;
+  plan: LoadSlot[];
+}
+
+export interface ScooterReading {
+  soc: number | null;
+  read_at: LocalDateTime;
+  power_cycled: boolean;
+  off_sent: boolean;
+  state_before: string | null;
+  state_on: string | null;
+  state_after: string | null;
+}
+
+export type GeyserButton = "power" | "w800" | "w1200" | "w2000" | "temp_up" | "temp_down";
+
+export interface GeyserLearnResult {
+  button: string;
+  ok: boolean;
+  error: string | null;
+  length: number | null;
+}
+
+export interface GeyserRemoteStatus {
+  learned: Record<string, boolean>;
+  learning: string | null;
+  last_sent: string | null;
+  uptime_s: number | null;
+  rssi: number | null;
+  last_learn: GeyserLearnResult | null;
 }
 
 export interface AutomationLastEvent {
@@ -139,6 +240,7 @@ export interface AutomationStatus {
   history_nights: number;
   history_dir: string;
   water: WaterStatus;
+  loads: LoadsStatus;
 }
 
 /** Local wall-clock time without a zone, e.g. "2026-09-26T21:05:00". */

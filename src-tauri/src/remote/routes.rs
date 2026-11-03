@@ -167,6 +167,12 @@ async fn dispatch(app: &AppHandle, command: &str, args: &Value) -> Result<Option
         "get_automation_insights" => to_json(auto::get_automation_insights(app.state()).await),
         "get_automation_decisions" => to_json(auto::get_automation_decisions(app.state(), arg(args, "limit")?).await),
         "mark_water_done" => to_json(auto::mark_water_done(app.clone(), app.state()).await),
+        "mark_geyser_done" => to_json(auto::mark_geyser_done(app.clone(), app.state()).await),
+        "skip_scooter_today" => to_json(auto::skip_scooter_today(app.clone(), app.state()).await),
+        "read_scooter_now" => to_json(auto::read_scooter_now(app.state(), app.state(), arg(args, "powerCycle")?).await),
+        "get_geyser_remote" => to_json(auto::get_geyser_remote(app.state()).await),
+        "learn_geyser_button" => to_json(auto::learn_geyser_button(app.state(), arg(args, "name")?).await),
+        "press_geyser_button" => to_json(auto::press_geyser_button(app.state(), arg(args, "name")?).await),
 
         "get_energy_summary" => to_json(en::get_energy_summary(app.state()).await),
         "set_bill_reading" => to_json(en::set_bill_reading(app.clone(), app.state(), arg(args, "day")?, arg(args, "time")?).await),

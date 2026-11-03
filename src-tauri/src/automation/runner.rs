@@ -17,13 +17,16 @@ use crate::automation::telemetry::{
     estimate_discharge_a, first_at_or_below, project_day, soc_per_ah, soc_per_hour_at, soc_trajectory, DayProjection,
     DayProjectionInput, EngineReading, SocPoint,
 };
+use crate::automation::loads::{self, EvCharge, EvDecision, GeyserCommand, GeyserIntent, LoadsInput, LoadsMemory};
 use crate::automation::water::{self, WaterInput, WaterMemory};
 use crate::automation::weather::{self, Forecast, SummaryInput, WeatherSummary};
 use crate::automation::{AutomationState, Phase};
 use crate::battery::BatteryState;
+use crate::geyser::{Button, GeyserRemote};
 use crate::inverter::client::SolarClient;
 use crate::inverter::types::output_mode_name;
 use crate::notifications::{NotificationSink, Notifier, Reading as NotifyReading};
+use crate::scooter::ScooterState;
 use crate::storage::AppSettings;
 
 const SBG_MODE: u32 = 1;
@@ -115,8 +118,18 @@ const STARTUP_RECHECK: Duration = Duration::from_secs(10);
 /// Before the usual night start the agent is only asked about starting the
 /// battery early when it holds at least this much.
 const EARLY_START_MIN_SOC: f64 = 60.0;
+const GEYSER_REMOTE_RECHECK: Duration = Duration::from_secs(600);
+const EV_RECHECK_RANGE: (f64, f64) = (30.0, 240.0);
+const EV_RETRY_MINUTES: i64 = 30;
 
-pub fn spawn(state: AutomationState, client: SolarClient, battery: BatteryState, notifier: Notifier, app: AppHandle) {
+pub fn spawn(
+    state: AutomationState,
+    client: SolarClient,
+    battery: BatteryState,
+    scooter: ScooterState,
+    notifier: Notifier,
+    app: AppHandle,
+) {
     tauri::async_runtime::spawn(async move {
         let agent = agent::NodeAgent::new();
         let weather_http = reqwest::Client::builder()
@@ -130,6 +143,7 @@ pub fn spawn(state: AutomationState, client: SolarClient, battery: BatteryState,
             let services = Services {
                 client: &client,
                 battery: &battery,
+                scooter: &scooter,
                 notifier: &notifier,
                 agent: &agent,
                 weather_http: &weather_http,
@@ -148,6 +162,7 @@ pub fn spawn(state: AutomationState, client: SolarClient, battery: BatteryState,
 struct Services<'a> {
     client: &'a SolarClient,
     battery: &'a BatteryState,
+    scooter: &'a ScooterState,
     notifier: &'a Notifier,
     agent: &'a dyn AgentRunner,
     weather_http: &'a reqwest::Client,
@@ -623,6 +638,8 @@ pub struct EngineMemory {
     water: WaterMemory,
     stuck_sbg_since: Option<Instant>,
     last_sbg_kick_at: Option<Instant>,
+    loads: LoadsMemory,
+    geyser_remote: Option<(String, Instant, bool)>,
 }
 
 impl EngineMemory {
@@ -894,7 +911,8 @@ async fn tick(
     sync_plan_status(&engine, memory, &ctx).await;
     state.set_insights(build_insights(state, config, memory, &reading, &ctx)).await;
     let water_next = water_reminder(state, services.notifier, memory, &reading, &ctx, config).await;
-    until(now, water_next, sleep_for)
+    let loads_next = loads_reminder(state, services, memory, &reading, &ctx, config).await;
+    until(now, water_next.into_iter().chain(loads_next).min(), sleep_for)
 }
 
 async fn water_reminder(
@@ -923,6 +941,200 @@ async fn water_reminder(
     }
     state.set_status(|status| status.water = step.status).await;
     step.next_at
+}
+
+/// The geyser, scooter and water motor share the spare sun; see `loads`.
+async fn loads_reminder(
+    state: &AutomationState,
+    services: &Services<'_>,
+    memory: &mut EngineMemory,
+    reading: &EngineReading,
+    ctx: &Context,
+    config: &AutomationConfig,
+) -> Option<NaiveDateTime> {
+    let now = ctx.clock.now;
+    let today = now.date();
+    let scooter = services.scooter;
+    let ev_reading = scooter
+        .latest()
+        .await
+        .and_then(|read| read.soc.map(|soc| loads::EvReading { soc, at: read.read_at, live: read.power_cycled }));
+    let remote_ready = geyser_remote_ready(memory, config).await;
+    let tonight_start = ctx.clock.night_start_on(today);
+    let tonight_needs_soc = reading.soc.and_then(|_| {
+        night_trajectory(ctx, reading, config, tonight_start, 100.0, None)
+            .0
+            .last()
+            .map(|point| (100.0 - point.soc).max(0.0))
+    });
+    let pv_ratio = ctx
+        .forecast
+        .as_ref()
+        .and_then(|forecast| {
+            loads::pv_ratio(&ctx.samples, forecast, config.pv_array_watts, reading.max_charge_a, now - chrono::Duration::days(RECENT_DAYS))
+        })
+        .unwrap_or_else(loads::default_pv_ratio);
+    let typical = |hour: u32| typical_day_load(ctx, hour);
+    let water_pending =
+        config.water_reminder_enabled && state.water_done_on().await != Some(today) && now.hour() < config.water_end_hour;
+    let geyser_done_on = state.geyser_done_on().await;
+    let ev_skip_on = state.ev_skip_on().await;
+    let ev_reader_busy = scooter.busy().await;
+    let step = loads::step(
+        &mut memory.loads,
+        &LoadsInput {
+            now,
+            daytime: ctx.clock.window() == Window::Day,
+            sunset: ctx.clock.sunset_today,
+            soc: reading.soc,
+            rated_ah: reading.rated_capacity_ah,
+            volts: pack_volts(reading),
+            max_charge_a: reading.max_charge_a,
+            charge_a: reading.charge_a,
+            pv_w: reading.pv_w,
+            load_w: reading.load_w,
+            forecast: ctx.forecast.as_ref(),
+            pv_ratio,
+            typical_load: &typical,
+            tonight_needs_soc,
+            config,
+            water_pending,
+            geyser_done_on,
+            ev_skip_on,
+            ev_reading,
+            ev_reader_busy,
+            remote_ready,
+        },
+    );
+    for (title, body) in &step.notify {
+        services.notifier.send(title, body);
+    }
+    if let Some(command) = step.geyser_command {
+        let ok = press_geyser(config, command).await;
+        memory.loads.geyser_sent(command, now, ok);
+    }
+    if let Some(power_cycle) = step.ev_read {
+        spawn_scooter_read(state, services, config, power_cycle);
+    }
+    let mut next_at = step.next_at;
+    if let Some(input) = step.ev_input {
+        ask_ev(state, services.agent, &mut memory.loads, input, now).await;
+        next_at = Some(now);
+    }
+    let mut status = step.status;
+    status.ev.reading = scooter.busy().await;
+    status.ev.read_error = scooter.last_error().await;
+    state.set_status(|current| current.loads = status).await;
+    next_at
+}
+
+async fn geyser_remote_ready(memory: &mut EngineMemory, config: &AutomationConfig) -> bool {
+    let host = &config.geyser_esp32_host;
+    if config.dry_run || !config.geyser_auto_control || host.is_empty() {
+        return false;
+    }
+    if let Some((checked_host, at, ready)) = &memory.geyser_remote {
+        if checked_host == host && at.elapsed() < GEYSER_REMOTE_RECHECK {
+            return *ready;
+        }
+    }
+    let needed = [Button::Power, Button::W800, Button::W1200, Button::W2000];
+    let ready = match GeyserRemote::new(host).status().await {
+        Ok(status) => needed.iter().all(|button| status.is_learned(*button)),
+        Err(error) => {
+            tracing::warn!("geyser remote unavailable: {error}");
+            false
+        }
+    };
+    memory.geyser_remote = Some((host.clone(), Instant::now(), ready));
+    ready
+}
+
+async fn press_geyser(config: &AutomationConfig, command: GeyserCommand) -> bool {
+    let button = match command.intent {
+        _ if command.press_power => Some(Button::Power),
+        GeyserIntent::On(watts) => Button::for_watts(watts.round() as u32),
+        GeyserIntent::Off => Some(Button::Power),
+    };
+    let Some(button) = button else {
+        tracing::warn!("no geyser button for {:?}", command.intent);
+        return false;
+    };
+    match GeyserRemote::new(&config.geyser_esp32_host).send(button).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!("geyser remote could not press {}: {error}", button.as_str());
+            false
+        }
+    }
+}
+
+/// Bluetooth reads take a while, so they run beside the engine and the
+/// next tick picks the result up.
+fn spawn_scooter_read(state: &AutomationState, services: &Services<'_>, config: &AutomationConfig, power_cycle: bool) {
+    let scooter = services.scooter.clone();
+    let notifier = services.notifier.clone();
+    let wake = state.wake.clone();
+    let name = config.ev_ble_name.clone();
+    let mac = config.ev_ble_mac.clone();
+    tauri::async_runtime::spawn(async move {
+        let mac = Some(mac.as_str()).filter(|mac| !mac.is_empty());
+        match scooter.read(&name, mac, power_cycle).await {
+            Ok(_) => wake.notify_one(),
+            Err(error) if error.contains("may still be ON") => {
+                notifier.send(loads::EV_TITLE, "Couldn't switch the scooter off after reading its charge — check it and switch it off by hand.");
+            }
+            Err(_) => {}
+        }
+    });
+}
+
+async fn ask_ev(state: &AutomationState, agent: &dyn AgentRunner, memory: &mut LoadsMemory, input: agent::EvInput, now: NaiveDateTime) {
+    if let Some(reason) = agent::missing_key_reason() {
+        tracing::info!("scooter decision uses the app's rule: {reason}");
+        memory.ev_ask_failed(now + chrono::Duration::minutes(EV_RETRY_MINUTES));
+        return;
+    }
+    let soc = input.soc;
+    match agent.run_ev(input).await {
+        Ok(plan) => {
+            let recheck = if plan.recheck_minutes.is_finite() { plan.recheck_minutes } else { EV_RECHECK_RANGE.0 };
+            let recheck = recheck.clamp(EV_RECHECK_RANGE.0, EV_RECHECK_RANGE.1).round() as i64;
+            let decision = EvDecision {
+                charge: EvCharge::parse(&plan.charge_today),
+                reason: plan.reason,
+                model: plan.model,
+                at: now,
+                soc,
+                recheck_at: now + chrono::Duration::minutes(recheck),
+            };
+            let mode = match decision.charge {
+                EvCharge::Yes => "scooter_charge",
+                EvCharge::IfSpare => "scooter_if_spare",
+                EvCharge::No => "scooter_skip",
+            };
+            let row = DecisionRow {
+                at: now,
+                window: Window::Day.label().into(),
+                mode: mode.into(),
+                reserve_soc: None,
+                recheck_minutes: Some(recheck as u32),
+                confidence: None,
+                dry_run: false,
+                applied: false,
+                reason: decision.reason.clone(),
+                model: decision.model.clone(),
+            };
+            if let Err(error) = state.history.append_decision(&row) {
+                tracing::warn!("could not record scooter decision: {error}");
+            }
+            memory.record_ev_decision(decision);
+        }
+        Err(error) => {
+            tracing::warn!("scooter decision agent failed: {error}");
+            memory.ev_ask_failed(now + chrono::Duration::minutes(EV_RETRY_MINUTES));
+        }
+    }
 }
 
 async fn idle(engine: &Engine<'_>, memory: &mut EngineMemory) -> Duration {
@@ -2634,6 +2846,10 @@ mod tests {
             let next = self.day.lock().unwrap().pop_front().expect("unexpected day call");
             Box::pin(async move { next.map_err(AgentError::ScriptFailed) })
         }
+
+        fn run_ev(&self, _input: agent::EvInput) -> BoxFuture<'_, Result<agent::EvPlan, AgentError>> {
+            Box::pin(async { Err(AgentError::ScriptFailed("no ev agent in tests".into())) })
+        }
     }
 
     fn day_decision(mode: &str, recheck: f64) -> Result<agent::DayDecision, String> {
@@ -2674,7 +2890,7 @@ mod tests {
             };
             let dir = std::env::temp_dir().join(format!("solar-hub-runner-{}", uuid::Uuid::new_v4()));
             Self {
-                state: AutomationState::new(config.clone(), HistoryStore::new(dir.clone()), None),
+                state: AutomationState::new(config.clone(), HistoryStore::new(dir.clone()), None, None, None),
                 client: SolarClient::new(SolarCredentials::default()),
                 notifier: FakeNotifier::default(),
                 config,

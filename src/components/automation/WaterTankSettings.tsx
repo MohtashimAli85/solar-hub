@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
 import { hourLabel, SectionTitle } from "./shared";
 
-type NumericKey = "water_motor_watts" | "water_full_soc" | "water_cloudy_soc" | "water_repeat_minutes";
+type NumericKey = "water_motor_watts" | "water_full_soc" | "water_cloudy_soc" | "water_repeat_minutes" | "water_run_minutes";
 type HourKey = "water_start_hour" | "water_end_hour" | "water_cloudy_hour";
 type WaterKey = NumericKey | HourKey | "water_reminder_enabled";
 type WaterForm = Pick<AutomationConfig, WaterKey>;
@@ -18,15 +18,19 @@ const RANGES: Record<NumericKey, { min: number; max: number }> = {
   water_full_soc: { min: 0, max: 100 },
   water_cloudy_soc: { min: 0, max: 100 },
   water_repeat_minutes: { min: 5, max: 120 },
+  water_run_minutes: { min: 5, max: 240 },
 };
 
 const HOURS = Array.from({ length: 13 }, (_, index) => index + 6);
 
-function fieldError(key: NumericKey, value: number): string | null {
-  const range = RANGES[key];
+export function rangeError(range: { min: number; max: number }, value: number): string | null {
   if (Number.isNaN(value)) return "Enter a number";
   if (value < range.min || value > range.max) return `${range.min}–${range.max}`;
   return null;
+}
+
+function fieldError(key: NumericKey, value: number): string | null {
+  return rangeError(RANGES[key], value);
 }
 
 function hoursError(form: WaterForm): string | null {
@@ -47,10 +51,11 @@ function pickWater(config: AutomationConfig): WaterForm {
     water_cloudy_hour: config.water_cloudy_hour,
     water_cloudy_soc: config.water_cloudy_soc,
     water_repeat_minutes: config.water_repeat_minutes,
+    water_run_minutes: config.water_run_minutes,
   };
 }
 
-function NumberField({
+export function NumberField({
   id,
   label,
   help,
@@ -80,7 +85,7 @@ function NumberField({
   );
 }
 
-function HourField({
+export function HourField({
   id,
   label,
   help,
@@ -208,6 +213,14 @@ export function WaterTankSettings({ config, saving, onSave }: WaterTankSettingsP
               value={form.water_cloudy_soc}
               error={errors.water_cloudy_soc}
               onChange={(value) => set("water_cloudy_soc", value)}
+            />
+            <NumberField
+              id="water-run"
+              label="Motor runs for (minutes)"
+              help="How long the tank takes to fill, so the geyser and scooter plans leave room for it."
+              value={form.water_run_minutes}
+              error={errors.water_run_minutes}
+              onChange={(value) => set("water_run_minutes", value)}
             />
             <NumberField
               id="water-repeat"

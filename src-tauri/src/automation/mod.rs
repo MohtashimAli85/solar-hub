@@ -4,6 +4,7 @@ pub mod config;
 pub mod guardrails;
 pub mod history;
 pub mod insights;
+pub mod loads;
 pub mod runner;
 pub mod telemetry;
 pub mod water;
@@ -20,6 +21,7 @@ use tokio::sync::{Mutex, Notify};
 use config::AutomationConfig;
 use history::HistoryStore;
 use insights::AutomationInsights;
+use loads::LoadsStatus;
 use water::WaterStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -62,6 +64,7 @@ pub struct AutomationStatus {
     pub history_nights: u32,
     pub history_dir: String,
     pub water: WaterStatus,
+    pub loads: LoadsStatus,
 }
 
 impl Default for AutomationStatus {
@@ -85,6 +88,7 @@ impl Default for AutomationStatus {
             history_nights: 0,
             history_dir: String::new(),
             water: WaterStatus::default(),
+            loads: LoadsStatus::default(),
         }
     }
 }
@@ -99,10 +103,18 @@ pub struct AutomationState {
     /// Set by "Check now": the next tick asks the agent even if nothing is due.
     pub force_check: Arc<AtomicBool>,
     pub water_done_on: Arc<Mutex<Option<NaiveDate>>>,
+    pub geyser_done_on: Arc<Mutex<Option<NaiveDate>>>,
+    pub ev_skip_on: Arc<Mutex<Option<NaiveDate>>>,
 }
 
 impl AutomationState {
-    pub fn new(config: AutomationConfig, history: HistoryStore, water_done_on: Option<NaiveDate>) -> Self {
+    pub fn new(
+        config: AutomationConfig,
+        history: HistoryStore,
+        water_done_on: Option<NaiveDate>,
+        geyser_done_on: Option<NaiveDate>,
+        ev_skip_on: Option<NaiveDate>,
+    ) -> Self {
         let status = AutomationStatus {
             enabled: config.enabled,
             dry_run: config.dry_run,
@@ -117,6 +129,8 @@ impl AutomationState {
             wake: Arc::new(Notify::new()),
             force_check: Arc::new(AtomicBool::new(false)),
             water_done_on: Arc::new(Mutex::new(water_done_on)),
+            geyser_done_on: Arc::new(Mutex::new(geyser_done_on)),
+            ev_skip_on: Arc::new(Mutex::new(ev_skip_on)),
         }
     }
 
@@ -143,6 +157,14 @@ impl AutomationState {
 
     pub async fn water_done_on(&self) -> Option<NaiveDate> {
         *self.water_done_on.lock().await
+    }
+
+    pub async fn geyser_done_on(&self) -> Option<NaiveDate> {
+        *self.geyser_done_on.lock().await
+    }
+
+    pub async fn ev_skip_on(&self) -> Option<NaiveDate> {
+        *self.ev_skip_on.lock().await
     }
 
     pub async fn notify_event(&self, message: impl Into<String>) {

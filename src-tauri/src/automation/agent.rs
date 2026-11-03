@@ -286,10 +286,64 @@ pub struct DayDecision {
     pub model: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct EvHourRow {
+    pub time: String,
+    pub spare_w: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EvDayRow {
+    pub date: String,
+    pub relative: String,
+    pub radiation_kwh_m2: Option<f64>,
+    pub sunshine_h: Option<f64>,
+    pub cloud_pct: Option<f64>,
+    pub rain_prob_pct: Option<f64>,
+    pub expected_pv_kwh: Option<f64>,
+    /// What that day's sun leaves after the house, the battery's refill, the
+    /// geyser and the water tank.
+    pub expected_spare_kwh: Option<f64>,
+}
+
+/// Everything is pre-computed here so the model reasons instead of doing
+/// arithmetic.
+#[derive(Debug, Clone, Serialize)]
+pub struct EvInput {
+    pub now: String,
+    pub sunset: String,
+    pub hours_of_sun_left: f64,
+    pub soc: f64,
+    pub soc_basis: String,
+    pub battery_kwh: f64,
+    pub charger_w: f64,
+    pub hours_to_full: f64,
+    pub daily_use_pct: f64,
+    pub days_of_riding_left: f64,
+    pub charging_now: bool,
+    pub need_kwh: f64,
+    /// Spare solar left today once the water tank and geyser have theirs and
+    /// the battery still reaches tonight's need.
+    pub spare_kwh_today: f64,
+    pub today_hours: Vec<EvHourRow>,
+    pub other_loads_today: String,
+    pub next_days: Vec<EvDayRow>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EvPlan {
+    pub charge_today: String,
+    pub recheck_minutes: f64,
+    pub reason: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 pub trait AgentRunner: Send + Sync {
     fn run_sun(&self, input: SunInput) -> BoxFuture<'_, Result<SunInfo, AgentError>>;
     fn run_night(&self, input: NightInput) -> BoxFuture<'_, Result<NightPlan, AgentError>>;
     fn run_day(&self, input: DayInput) -> BoxFuture<'_, Result<DayDecision, AgentError>>;
+    fn run_ev(&self, input: EvInput) -> BoxFuture<'_, Result<EvPlan, AgentError>>;
 }
 
 pub struct NodeAgent;
@@ -319,6 +373,10 @@ impl AgentRunner for NodeAgent {
 
     fn run_day(&self, input: DayInput) -> BoxFuture<'_, Result<DayDecision, AgentError>> {
         Box::pin(async move { run_script("day.js", &input, &model_keys()?).await })
+    }
+
+    fn run_ev(&self, input: EvInput) -> BoxFuture<'_, Result<EvPlan, AgentError>> {
+        Box::pin(async move { run_script("ev.js", &input, &model_keys()?).await })
     }
 }
 

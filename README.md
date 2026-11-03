@@ -12,10 +12,10 @@ JBD BMS over Bluetooth.
 
 | Tab | What it shows |
 |---|---|
-| **Dashboard** | Battery %, charge/discharge rate with a readable time estimate ("15% in ~8 min · around 6:15 AM", "Full in ~2 h 50 min"), solar, house load, grid status, output-source and smart-load controls, a summary of what the automation is doing, and electricity units taken from the grid, per meter. |
+| **Dashboard** | Battery %, charge/discharge rate with a readable time estimate ("15% in ~8 min · around 6:15 AM", "Full in ~2 h 50 min"), solar, house load, grid status, output-source and smart-load controls, a summary of what the automation is doing, the solar loads (water tank, geyser, scooter: what to switch on or off now), and electricity units taken from the grid, per meter. |
 | **Battery** | Pack health, cell voltages and balance, temperatures, protection flags and short trend charts from the BMS. |
 | **Inverter** | Live power flows (solar in, house load, grid), output source, device summary, advanced charger/cutoff settings and every raw field from the cloud. |
-| **Automation** | Tonight's plan and battery projection, the day rule, the household routine it has learned, the weather outlook, recent outages, a log of every decision and why, the CSV records folder, and all automation settings. |
+| **Automation** | Tonight's plan and battery projection, the day rule, the household routine it has learned, the weather outlook, recent outages, a log of every decision and why, the CSV records folder, and all automation settings, including the water tank, geyser (and its ESP32 remote) and scooter. |
 | **Settings** | Solar cloud account, location, and the Groq and Gemini API keys (both needed; Groq is tried first). |
 
 macOS notifications fire for grid off/back, low battery, high discharge,
@@ -226,6 +226,71 @@ The app sets it like this:
 Each setting is applied once when the target changes. If you change it by
 hand, the app leaves it alone until the target changes again.
 
+### Solar loads: water tank, geyser and scooter
+
+Three loads on the inverter's smart-load output are run on spare sun. You
+switch them by hand when the app says so, except the geyser once an ESP32 is
+set up to press its remote's buttons.
+
+| Load | Power | Rule |
+|---|---|---|
+| Water-tank motor | 1000 W, about 30 min | Once a day, inside its window (see the water-tank settings) |
+| Geyser | 800, 1200 or 2000 W (both elements) | Heats in the sunniest stretch, 10 AM–4 PM by default; off from sunset |
+| Scooter (Yadea T5L) | 600 W charger, 2.16 kWh pack | Solar only, never the grid; charges to 100% |
+
+**What counts as spare.** Every few minutes the app works out the rest of the
+day in 15-minute steps: forecast solar (radiation × panel size × how the
+panels really compare with the forecast, measured on days when the battery was
+still charging) minus the usual house load for that hour. A load may run as
+long as the battery still reaches **what tonight needs by sunset** (the floor
+plus a normal night's use, plus 5%). A load may also use the battery for a
+while, but only charge that the rest of the day's sun puts back. On a cloudy
+day that means the geyser doesn't run, and you get one note saying so.
+
+**Who goes first.** The tank first. Then the scooter, if the AI says it has to
+charge today. Then the geyser, then the scooter if the sun is spare. The
+geyser gets the highest power the spare sun can carry, and is told to step
+down to a lower power or switch off when a cloud comes and stays for 10
+minutes.
+
+**What's running.** The app spots each load from the step it makes in the house
+load: +600 W is the scooter, +800/+1200/+2000 W the geyser, +1000 W the motor.
+A load it just asked for wins a close call. When the geyser drops out on its
+own, that's the thermostat: the water is hot, and the card says how many kWh
+it took. When the charger drops out above about 80%, the scooter is full.
+
+**The scooter's %.** The app reads it over Bluetooth from the scooter
+(`YD64071540`, after the pairing handshake in `src-tauri/src/scooter/`). The
+scooter only updates its % while switched on, so a normal read gives the % it
+held when it was last switched off, and while the charger runs the app
+estimates it at about 25% an hour. With **Read a live % while charging** on,
+it switches the scooter on, reads, and switches it off again about once an
+hour while charging. Use **Test on → read → off** in the scooter settings
+first, standing next to the scooter. The scooter has to be within Bluetooth
+range of the Mac.
+
+**Charge today?** The AI (`agent/ev.js`) gets the scooter's %, your daily
+riding (25%), today's spare solar and the next three days' forecast with the
+spare solar each is likely to leave. It answers **yes** (ahead of the geyser,
+e.g. 80% but the coming days look cloudy), **if the sun is spare** (after the
+geyser) or **no**. Without an answer, the app's own rule applies: yes below
+two days of riding, or when tomorrow can't cover it. Decisions show in the
+log.
+
+**Geyser over the ESP32.** `esp32/geyser-ir/` is the firmware for an ESP32
+that learns the geyser's IR remote and presses its buttons when the app asks
+(parts, wiring and flashing are in its README). Learn On/Off, 800, 1200 and
+2000 W from the geyser settings, then turn on **Switch the geyser
+automatically**. Every press is checked against the house load a few minutes
+later. If the geyser doesn't start (it may already be hot) or doesn't stop,
+the app says so and goes back to reminders for the day. It never presses
+anything in dry run.
+
+**Buttons.** On the dashboard: **Done** for the tank, **Hot enough** for the
+geyser, **Read now** and **Not today** for the scooter. Reminders repeat at the
+water tank's repeat interval. At night the geyser and scooter only get one
+"switch off" reminder.
+
 ### Safety
 
 - **Dry run is on by default.** The engine decides, notifies ("[Dry run] Would
@@ -362,7 +427,7 @@ against the app's number for the same day.
 
 The forecast comes from [Open-Meteo](https://open-meteo.com/). It's free and
 needs no key for non-commercial use (under 10,000 calls a day, 5,000 an hour
-and 600 a minute). The app fetches it every 30 minutes (about 48 calls a day)
+and 600 a minute). The app fetches the last 7 days and the next 4 every 30 minutes (about 48 calls a day)
 and shows the CC BY 4.0 credit the licence requires. If the forecast is
 unavailable, the agent is told so and keeps a larger reserve. A commercial
 release would need Open-Meteo's paid plan.
@@ -382,10 +447,13 @@ src-tauri/src/          Rust backend
                         bill periods, energy CSV
   battery/              BLE / JBD BMS connection and parsing
   automation/           engine (runner.rs), history (CSV), weather, telemetry,
-                        guardrails, agent bridge
+                        guardrails, agent bridge, solar loads planner (loads.rs)
+  scooter/              Yadea scooter over Bluetooth: pairing and reading its %
+  geyser/               client for the ESP32 that presses the geyser's remote
   notifications.rs      alert rules and macOS notifications
-agent/                  Node scripts that call the AI models: night.js, sun.js,
-                        and system.js (the one shared system prompt: modes,
+esp32/geyser-ir/        ESP32 firmware (PlatformIO) for the geyser's IR remote
+agent/                  Node scripts that call the AI models: night.js, day.js,
+                        ev.js (scooter charging), sun.js, and system.js (the one shared system prompt: modes,
                         smart load, household rules, goals)
 ```
 

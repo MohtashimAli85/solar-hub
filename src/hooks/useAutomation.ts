@@ -7,9 +7,12 @@ import {
   getAutomationDecisions,
   getAutomationInsights,
   getAutomationStatus,
+  markGeyserDone,
   markWaterDone,
   openRecordsFolder,
+  readScooterNow,
   sendTestNotification,
+  skipScooterToday,
   updateAutomationConfig,
 } from "@/lib/tauri";
 import type { AutomationConfig, AutomationStatus } from "@/lib/types";
@@ -93,6 +96,18 @@ export function useAutomation({ withInsights = false, decisionLimit = 0 } = {}) 
     mutationFn: markWaterDone,
     onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
   });
+  const geyserDone = useMutation({
+    mutationFn: markGeyserDone,
+    onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
+  });
+  const scooterSkip = useMutation({
+    mutationFn: skipScooterToday,
+    onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
+  });
+  const scooterRead = useMutation({
+    mutationFn: (powerCycle: boolean) => readScooterNow(powerCycle),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: STATUS_KEY }),
+  });
 
   return {
     status: statusQuery.data,
@@ -106,5 +121,8 @@ export function useAutomation({ withInsights = false, decisionLimit = 0 } = {}) 
     testNotification,
     openFolder,
     waterDone,
+    geyserDone,
+    scooterRead,
+    scooterSkip,
   };
 }

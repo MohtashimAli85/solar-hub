@@ -82,17 +82,41 @@ pub fn save_automation_config(app: &AppHandle, config: &AutomationConfig) -> Res
 }
 
 pub fn load_water_done_on(app: &AppHandle) -> Option<chrono::NaiveDate> {
-    app.store(AUTOMATION_STORE)
-        .ok()
-        .and_then(|store| store.get("water_done_on"))
-        .and_then(|value| serde_json::from_value(value).ok())
+    load_done_on(app, "water_done_on")
 }
 
 pub fn save_water_done_on(app: &AppHandle, date: chrono::NaiveDate) -> Result<(), String> {
+    save_done_on(app, "water_done_on", date)
+}
+
+pub fn load_geyser_done_on(app: &AppHandle) -> Option<chrono::NaiveDate> {
+    load_done_on(app, "geyser_done_on")
+}
+
+pub fn save_geyser_done_on(app: &AppHandle, date: chrono::NaiveDate) -> Result<(), String> {
+    save_done_on(app, "geyser_done_on", date)
+}
+
+pub fn load_ev_skip_on(app: &AppHandle) -> Option<chrono::NaiveDate> {
+    load_done_on(app, "ev_skip_on")
+}
+
+pub fn save_ev_skip_on(app: &AppHandle, date: chrono::NaiveDate) -> Result<(), String> {
+    save_done_on(app, "ev_skip_on", date)
+}
+
+fn load_done_on(app: &AppHandle, key: &str) -> Option<chrono::NaiveDate> {
+    app.store(AUTOMATION_STORE)
+        .ok()
+        .and_then(|store| store.get(key))
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn save_done_on(app: &AppHandle, key: &str, date: chrono::NaiveDate) -> Result<(), String> {
     let store = app
         .store(AUTOMATION_STORE)
         .map_err(|error| error.to_string())?;
-    store.set("water_done_on", json!(date));
+    store.set(key, json!(date));
     store.save().map_err(|error| error.to_string())
 }
 

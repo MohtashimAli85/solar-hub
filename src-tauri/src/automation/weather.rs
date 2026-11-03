@@ -37,7 +37,7 @@ pub async fn fetch(http: &reqwest::Client, latitude: f64, longitude: f64) -> Res
     let url = format!(
         "{FORECAST_URL}?latitude={}&longitude={}&hourly=temperature_2m,cloud_cover,shortwave_radiation\
          &daily=shortwave_radiation_sum,sunshine_duration,precipitation_probability_max,temperature_2m_min\
-         &timezone=auto&past_days=7&forecast_days=2",
+         &timezone=auto&past_days=7&forecast_days=4",
         round(latitude),
         round(longitude)
     );

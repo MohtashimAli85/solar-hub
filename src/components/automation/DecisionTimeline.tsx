@@ -11,9 +11,13 @@ const MODE_LABELS: Record<string, string> = {
   boost_sbg: "Battery · oven boost",
   smart_load_on: "Smart load on · heavy loads cut",
   smart_load_off: "Smart load off · everything runs",
+  scooter_charge: "Scooter · charge today",
+  scooter_if_spare: "Scooter · charge if sun is spare",
+  scooter_skip: "Scooter · no charge today",
 };
 
 function outcome(decision: AutomationDecision): string {
+  if (decision.mode.startsWith("scooter_")) return "Planned";
   if (!decision.applied) return "Kept";
   return decision.dry_run ? "Would switch" : "Switched";
 }

@@ -27,6 +27,24 @@ pub struct AutomationConfig {
     pub water_cloudy_hour: u32,
     pub water_cloudy_soc: f64,
     pub water_repeat_minutes: u32,
+    pub water_run_minutes: u32,
+    pub geyser_enabled: bool,
+    pub geyser_low_watts: f64,
+    pub geyser_high_watts: f64,
+    pub geyser_daily_kwh: f64,
+    pub geyser_start_hour: u32,
+    pub geyser_end_hour: u32,
+    /// The ESP32 IR blaster's host name or IP; empty means reminders only.
+    pub geyser_esp32_host: String,
+    pub geyser_auto_control: bool,
+    pub ev_enabled: bool,
+    pub ev_battery_kwh: f64,
+    pub ev_charger_watts: f64,
+    pub ev_daily_use_pct: f64,
+    pub ev_ble_name: String,
+    pub ev_ble_mac: String,
+    /// Allows switching the scooter on to read a live %, then off again.
+    pub ev_power_cycle_reads: bool,
 }
 
 impl Default for AutomationConfig {
@@ -52,6 +70,22 @@ impl Default for AutomationConfig {
             water_cloudy_hour: 14,
             water_cloudy_soc: 80.0,
             water_repeat_minutes: 15,
+            water_run_minutes: 30,
+            geyser_enabled: true,
+            geyser_low_watts: 800.0,
+            geyser_high_watts: 1200.0,
+            geyser_daily_kwh: 3.0,
+            geyser_start_hour: 10,
+            geyser_end_hour: 16,
+            geyser_esp32_host: String::new(),
+            geyser_auto_control: false,
+            ev_enabled: true,
+            ev_battery_kwh: 2.16,
+            ev_charger_watts: 600.0,
+            ev_daily_use_pct: 25.0,
+            ev_ble_name: "YD64071540".into(),
+            ev_ble_mac: String::new(),
+            ev_power_cycle_reads: false,
         }
     }
 }
@@ -74,6 +108,19 @@ impl AutomationConfig {
         self.water_full_soc = self.water_full_soc.clamp(0.0, 100.0);
         self.water_cloudy_soc = self.water_cloudy_soc.clamp(0.0, 100.0);
         self.water_repeat_minutes = self.water_repeat_minutes.clamp(5, 120);
+        self.water_run_minutes = self.water_run_minutes.clamp(5, 240);
+        self.geyser_low_watts = self.geyser_low_watts.clamp(100.0, 5_000.0);
+        self.geyser_high_watts = self.geyser_high_watts.clamp(100.0, 5_000.0);
+        self.geyser_daily_kwh = self.geyser_daily_kwh.clamp(0.5, 20.0);
+        self.geyser_start_hour = self.geyser_start_hour.clamp(6, 17);
+        self.geyser_end_hour = self.geyser_end_hour.clamp(self.geyser_start_hour + 1, 18);
+        self.geyser_esp32_host = self.geyser_esp32_host.trim().to_string();
+        self.geyser_auto_control &= !self.geyser_esp32_host.is_empty();
+        self.ev_battery_kwh = self.ev_battery_kwh.clamp(0.2, 100.0);
+        self.ev_charger_watts = self.ev_charger_watts.clamp(100.0, 10_000.0);
+        self.ev_daily_use_pct = self.ev_daily_use_pct.clamp(1.0, 100.0);
+        self.ev_ble_name = self.ev_ble_name.trim().to_string();
+        self.ev_ble_mac = self.ev_ble_mac.trim().to_uppercase();
     }
 }
 

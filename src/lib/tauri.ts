@@ -10,11 +10,14 @@ import type {
   DeviceDetails,
   DiscoveredDevice,
   EnergySummary,
+  GeyserButton,
+  GeyserRemoteStatus,
   MeterNumber,
   RemoteStatus,
   InverterSettings,
   InverterSnapshot,
   SavedBleDevice,
+  ScooterReading,
   SolarSettingsInput,
 } from "./types";
 
@@ -105,6 +108,18 @@ export const openRecordsFolder = () => invoke<void>("open_records_folder");
 export const sendTestNotification = () => invoke<void>("send_test_notification");
 
 export const markWaterDone = () => invoke<AutomationStatus>("mark_water_done");
+
+export const markGeyserDone = () => invoke<AutomationStatus>("mark_geyser_done");
+
+export const skipScooterToday = () => invoke<AutomationStatus>("skip_scooter_today");
+
+export const readScooterNow = (powerCycle: boolean) => invoke<ScooterReading>("read_scooter_now", { powerCycle });
+
+export const getGeyserRemote = () => invoke<GeyserRemoteStatus>("get_geyser_remote");
+
+export const learnGeyserButton = (name: GeyserButton) => invoke<GeyserRemoteStatus>("learn_geyser_button", { name });
+
+export const pressGeyserButton = (name: GeyserButton) => invoke<void>("press_geyser_button", { name });
 export const getEnergySummary = () => invoke<EnergySummary>("get_energy_summary");
 
 export const setBillReading = (day: number, time: string) =>

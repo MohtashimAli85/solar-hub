@@ -4,17 +4,22 @@ use inverter::client::{SolarClient, SolarCredentials};
 use inverter::InverterState;
 use state::AppState;
 use tauri::Manager;
-use storage::{get_solar_password, load_app_settings, load_automation_config, load_energy_config, load_remote_config, load_water_done_on};
+use storage::{
+    get_solar_password, load_app_settings, load_automation_config, load_energy_config, load_ev_skip_on, load_geyser_done_on,
+    load_remote_config, load_water_done_on,
+};
 use tracing_appender::non_blocking::WorkerGuard;
 
 pub mod automation;
 pub mod battery;
 pub mod energy;
 pub mod events;
+pub mod geyser;
 pub mod inverter;
 pub mod notifications;
 pub mod remote;
 pub mod resume;
+pub mod scooter;
 pub mod state;
 pub mod storage;
 
@@ -84,13 +89,22 @@ pub fn run() {
                 .join("Solar Hub");
             let history = automation::history::HistoryStore::new(records_root);
             let energy = energy::EnergyState::new(load_energy_config(&handle), history.clone());
-            let automation = AutomationState::new(automation_config, history, load_water_done_on(&handle));
+            let automation =
+                AutomationState::new(
+                    automation_config,
+                    history,
+                    load_water_done_on(&handle),
+                    load_geyser_done_on(&handle),
+                    load_ev_skip_on(&handle),
+                );
+            let scooter = scooter::ScooterState::new();
 
             app.manage(inverter.clone());
             app.manage(battery.clone());
             app.manage(automation.clone());
             app.manage(notifier.clone());
             app.manage(energy.clone());
+            app.manage(scooter.clone());
             battery::manager::spawn_disconnect_watcher(battery.clone(), handle.clone());
             battery::manager::spawn_reconnect_loop(battery.clone(), handle.clone());
             app.manage(AppState {
@@ -110,7 +124,7 @@ pub fn run() {
 
             resume::spawn(handle.clone(), automation.clone(), energy.clone(), battery.clone(), client.clone());
             energy::runner::spawn(energy, client.clone(), handle.clone());
-            automation::runner::spawn(automation, client, battery, notifier, handle.clone());
+            automation::runner::spawn(automation, client, battery, scooter, notifier, handle.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -145,6 +159,12 @@ pub fn run() {
             automation::commands::get_automation_decisions,
             automation::commands::open_records_folder,
             automation::commands::mark_water_done,
+            automation::commands::mark_geyser_done,
+            automation::commands::read_scooter_now,
+            automation::commands::skip_scooter_today,
+            automation::commands::get_geyser_remote,
+            automation::commands::learn_geyser_button,
+            automation::commands::press_geyser_button,
             automation::commands::send_test_notification,
             energy::commands::get_energy_summary,
             energy::commands::set_bill_reading,

@@ -2,7 +2,7 @@ import { AutomationSummaryCard } from "@/components/dashboard/AutomationSummaryC
 import { CommandHero } from "@/components/dashboard/CommandHero";
 import { BillCard } from "@/components/dashboard/BillCard";
 import { UnitsCard } from "@/components/dashboard/UnitsCard";
-import { WaterTankCard } from "@/components/dashboard/WaterTankCard";
+import { SolarLoadsCard } from "@/components/dashboard/SolarLoadsCard";
 import { OutputSourcePanel } from "@/components/inverter/OutputSourcePanel";
 import { useAutomation } from "@/hooks/useAutomation";
 import { useBatteryDevice } from "@/hooks/useBatteryDevice";
@@ -52,10 +52,17 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
         </div>
       </div>
 
-      <WaterTankCard
+      <SolarLoadsCard
         water={automation.status?.water}
-        pending={automation.waterDone.isPending}
-        onDone={() => automation.waterDone.mutate()}
+        loads={automation.status?.loads}
+        waterPending={automation.waterDone.isPending}
+        geyserPending={automation.geyserDone.isPending}
+        scooterPending={automation.scooterRead.isPending}
+        skipPending={automation.scooterSkip.isPending}
+        onWaterDone={() => automation.waterDone.mutate()}
+        onGeyserDone={() => automation.geyserDone.mutate()}
+        onReadScooter={() => automation.scooterRead.mutate(false)}
+        onSkipScooter={() => automation.scooterSkip.mutate()}
       />
 
       <UnitsCard />
