@@ -226,32 +226,89 @@ The app sets it like this:
 Each setting is applied once when the target changes. If you change it by
 hand, the app leaves it alone until the target changes again.
 
-### Solar loads: water tank, geyser and scooter
+### Solar loads: water tank, geyser, hotplate and scooter
 
-Three loads on the inverter's smart-load output are run on spare sun. You
+Four loads on the inverter's smart-load output are run on spare sun. You
 switch them by hand when the app says so, except the geyser once an ESP32 is
 set up to press its remote's buttons.
+
+**The AI plans, the app checks.** In the day the AI (`agent/loads.js`) is asked
+whenever the house load moves by 300 W or more, a button is pressed, a question
+is answered or the scooter's % changes, and at least every 15 minutes. It gets:
+
+- the last 90 minutes of load readings
+- the usual house load and the forecast for the rest of the day
+- what the app thinks is on
+- each load's rules
+- the next three days
+
+It answers with:
+
+- what is running and since when, read from the jumps in the load
+- one run per load for today
+- whether the scooter goes first
+- the line each row shows
+
+Before any of it is used, the app checks it:
+
+- The loads it says are on must add up to the measured load, with the usual
+  house load as the rest.
+- Each load uses one of its real levels and stays inside its hours, and only on
+  days it may run.
+- Simulated with the forecast, the plan keeps the battery above the day floor
+  and leaves it as full at sunset as the sun alone would.
+
+An answer that fails goes back to the AI once with the exact problems. If the
+second answer fails too, the app's own plan (below) runs until the next ask, and
+the card says so. When the AI can't tell two loads apart (the geyser at 1200 W
+or the hotplate), it asks a yes/no question on the card and in a notification;
+the answer goes into what it's told next time. Without a Groq or Gemini key the
+app's own plan runs as before.
 
 | Load | Power | Rule |
 |---|---|---|
 | Water-tank motor | 1000 W, about 30 min | Once a day, inside its window (see the water-tank settings) |
 | Geyser | 800, 1200 or 2000 W (both elements) | Heats in the sunniest stretch, 10 AM–4 PM by default; off from sunset |
+| Hotplate (electric cooker) | 100–2200 W, planned at 1800 W for 2.5 h | Every other day, 10 AM–3 PM; gas when the sun is short |
 | Scooter (Yadea T5L) | 600 W charger, 2.16 kWh pack | Solar only, never the grid; charges to 100% |
 
 **What counts as spare.** Every few minutes the app works out the rest of the
-day in 15-minute steps: forecast solar (radiation × panel size × how the
-panels really compare with the forecast, measured on days when the battery was
-still charging) minus the usual house load for that hour. A load may run as
-long as the battery still reaches **what tonight needs by sunset** (the floor
-plus a normal night's use, plus 5%). A load may also use the battery for a
-while, but only charge that the rest of the day's sun puts back. On a cloudy
-day that means the geyser doesn't run, and you get one note saying so.
+day in 15-minute steps: forecast solar minus the usual house load for that
+hour. A load may run as long as the battery is still **back to 100% by
+sunset**. In the day a load may draw the battery down to **80%** (a setting in
+the hotplate settings), but only charge that the afternoon sun puts back. Within those limits each load starts as early
+as it can, so with a full battery the scooter can go on right away even while
+the tank fills. On a cloudy day that means the geyser doesn't run, and you get
+one note saying so.
+
+**How much the panels really give.** Forecast solar is radiation × panel size ×
+a factor learned from the last 7 days: what the panels gave while the battery
+was still charging, compared with the forecast radiation for that hour. A
+reading where the battery was charging at its limit counts as a floor. The
+factor can go up to 2, because in winter tilted panels catch more than the
+flat-ground radiation the forecast gives. Until there are 12 such readings it
+uses 0.75. The night planner, the sunset projection and the water reminder all
+use the same factor.
 
 **Who goes first.** The tank first. Then the scooter, if the AI says it has to
-charge today. Then the geyser, then the scooter if the sun is spare. The
+charge today. Then the hotplate and the geyser, then the scooter if the sun is
+spare. The hotplate goes ahead of the geyser, except on Fridays (everyone
+bathes) and when last night dropped below 10°C; both are geyser settings. The
 geyser gets the highest power the spare sun can carry, and is told to step
 down to a lower power or switch off when a cloud comes and stays for 10
 minutes.
+
+**The hotplate.** Cooking days come every other day, counted from the last day
+you said yes. On a cooking day the card shows the best 2.5 hours between 10 AM
+and 3 PM and the highest level the sun can carry for all of it, or says to cook
+on gas. The hotplate's level changes as you cook, so the app can't tell it from
+the geyser by the step alone. In the cooking hours, a load it didn't ask for
+makes it ask "is it the hotplate?" (a notification, and **Yes, cooking** / **No**
+on the card). Until you answer, it isn't counted as the geyser. While you cook,
+the hotplate's draw is the house load less what it was before you started. If
+the sun can't carry that, the card says to turn it down to a level it can. The
+session ends with **Done cooking**, or once the extra load has been gone for
+10 minutes.
 
 **What's running.** The app spots each load from the step it makes in the house
 load: +600 W is the scooter, +800/+1200/+2000 W the geyser, +1000 W the motor.
@@ -269,13 +326,56 @@ hour while charging. Use **Test on → read → off** in the scooter settings
 first, standing next to the scooter. The scooter has to be within Bluetooth
 range of the Mac.
 
-**Charge today?** The AI (`agent/ev.js`) gets the scooter's %, your daily
-riding (25%), today's spare solar and the next three days' forecast with the
-spare solar each is likely to leave. It answers **yes** (ahead of the geyser,
-e.g. 80% but the coming days look cloudy), **if the sun is spare** (after the
-geyser) or **no**. Without an answer, the app's own rule applies: yes below
-two days of riding, or when tomorrow can't cover it. Decisions show in the
-log.
+**Is it charging?** The scooter's Bluetooth module doesn't report charging,
+and the +600 W of the charger is easy to confuse with the hotplate. **Read
+now** on the dashboard switches the scooter on, reads its %, and switches it
+off (about 20 s). Tap it again 10–15 minutes later: a rise of 1% or more (over that read, or
+over the app's last figure) means the charger is on (it adds about 4% in 10 minutes), the same % means it isn't,
+and a drop means it was ridden. The row shows the result, and the AI is told
+it as fact, like a Change. The app never switches the scooter on by itself for
+this.
+
+**Daily check.** Once a day at 10:30 (a scooter setting) the app switches the
+scooter on, reads its %, and switches it off. If the scooter isn't near, it
+tries twice more, 30 minutes apart, then says so on the card. A manual **Read
+now** after 10:30 counts as the day's check, and a restart doesn't repeat it.
+
+**Charge today?** The family's rule, which the AI has to follow:
+
+- **At or below 80%:** charge today.
+- **Above 80%:** no charge is needed, unless tomorrow's forecast leaves too
+  little spare sun to charge it (after the geyser) while today's sun can.
+
+While a charge is needed and the scooter's slot has started, "Plug in the
+scooter" repeats every 30 minutes until the charger's +600 W shows up or you
+tap **Plugged in**. When the charger switches itself off, the app says:
+"Scooter full — switch the charger off at the wall first, then unplug the
+battery" (the order the manual asks for). The first plan of the day, a change
+in the scooter's turn and every fallback show in the log.
+
+**Do this now.** A strip at the top of the dashboard lists only what needs
+your hands right now, each with its button:
+
+- something to switch on, off or down
+- the scooter to plug in or unplug
+- a question from the AI
+- "Is the tank filled?", asked when a motor run stops
+
+It's hidden when there's nothing to do.
+
+**Spare sun now.** The Solar loads header says how much sun is spare right now
+after the house and what's on, and which still-needed load fits and until when
+("Spare now 2.2 kW · geyser 2000 W fits until about 1 PM").
+
+**Sun today.** A line chart on the dashboard shows the panels' expected output
+through today next to what they really gave so far. The forecast is the
+radiation × the array size × a factor learned from the last 21 days. The first
+and last hours of light learn their own factor per half hour, because low sun
+and shade cut the panels far more than the flat-ground forecast says. The
+forecast never goes above the panels' best reading. The last hour's readings
+(only while the battery isn't full) pull the next few hours towards what the
+sky is really doing. A dashed line marks 100 W, and the line above the chart
+says when the panels give 100 W or more and when they peak.
 
 **Geyser over the ESP32.** `esp32/geyser-ir/` is the firmware for an ESP32
 that learns the geyser's IR remote and presses its buttons when the app asks
@@ -287,7 +387,14 @@ the app says so and goes back to reminders for the day. It never presses
 anything in dry run.
 
 **Buttons.** On the dashboard: **Done** for the tank, **Hot enough** for the
-geyser, **Read now** and **Not today** for the scooter. Reminders repeat at the
+geyser, **Yes, cooking** / **No**, **Done cooking** and **Not today** for the
+hotplate, **Read now** and **Not today** for the scooter. **Change** on every row
+opens a short list of what could be true ("On at 1200 W", "Off, not hot yet",
+"Cooked today", "Charging"…); picking one applies it at once. Use it when the
+app got it wrong (e.g. the geyser was switched off by hand, not by its
+thermostat; the hotplate was used). The app takes it as
+fact, tells the AI, and rejects an AI answer that contradicts it until
+the load changes by 400 W or an hour has passed. Reminders repeat at the
 water tank's repeat interval. At night the geyser and scooter only get one
 "switch off" reminder.
 
@@ -453,7 +560,7 @@ src-tauri/src/          Rust backend
   notifications.rs      alert rules and macOS notifications
 esp32/geyser-ir/        ESP32 firmware (PlatformIO) for the geyser's IR remote
 agent/                  Node scripts that call the AI models: night.js, day.js,
-                        ev.js (scooter charging), sun.js, and system.js (the one shared system prompt: modes,
+                        loads.js (the solar loads), sun.js, and system.js (the one shared system prompt: modes,
                         smart load, household rules, goals)
 ```
 

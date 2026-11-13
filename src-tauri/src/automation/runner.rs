@@ -6,7 +6,7 @@ use tauri::AppHandle;
 
 use crate::automation::agent::{
     self, AgentError, AgentRunner, DayHistoryRow, DayInput, DaySwitchRow, HourLoadRow, HourOutlookRow, NextDayRow,
-    NightInput, NightOutcomeRow, OutageRow, PreviousPlan, RecentDayRow, SmartLoadBrief, SocRow, SunInfo, SunInput,
+    NightInput, NightOutcomeRow, OutageRow, PreviousPlan, RecentDayRow, RefillSummary, SmartLoadBrief, SocRow, SunInfo, SunInput,
     WeatherBrief,
 };
 use crate::automation::config::AutomationConfig;
@@ -15,9 +15,10 @@ use crate::automation::history::{self, DecisionRow, NightProfile, Outage, Sample
 use crate::automation::insights::{AutomationInsights, RecordsInfo, RoutineInsight, SmartLoadInsight};
 use crate::automation::telemetry::{
     estimate_discharge_a, first_at_or_below, project_day, soc_per_ah, soc_per_hour_at, soc_trajectory, DayProjection,
-    DayProjectionInput, EngineReading, SocPoint,
+    DayProjectionInput, EngineReading, SocPoint, FULL_SOC,
 };
-use crate::automation::loads::{self, EvCharge, EvDecision, GeyserCommand, GeyserIntent, LoadsInput, LoadsMemory};
+use crate::automation::solar;
+use crate::automation::loads::{self, GeyserCommand, GeyserIntent, LoadsInput, LoadsMemory};
 use crate::automation::water::{self, WaterInput, WaterMemory};
 use crate::automation::weather::{self, Forecast, SummaryInput, WeatherSummary};
 use crate::automation::{AutomationState, Phase};
@@ -68,6 +69,7 @@ const MAX_RECHECK_MINUTES: f64 = 120.0;
 const MAX_RESERVE_SOC: f64 = 95.0;
 const HISTORY_NIGHTS: usize = 7;
 const RECENT_DAYS: i64 = 7;
+const PV_SHAPE_DAYS: i64 = 21;
 const NOMINAL_PACK_VOLTS: f64 = 25.6;
 const INVERTER_EFFICIENCY: f64 = 0.9;
 /// Smart load goes on once the battery drain has been at or above its
@@ -86,6 +88,16 @@ const NO_SUN_PV_W: f64 = 150.0;
 const SUN_PV_W: f64 = 300.0;
 /// Back on SBG once PV holds SUN_PV_W for SUN_BACK_MINUTES.
 const SUN_BACK_MINUTES: i64 = 15;
+/// The sky is judged on this many minutes of readings, so one bright reading
+/// or a moment the battery rests doesn't restart the dim clock.
+const SKY_WINDOW_MINUTES: i64 = 10;
+/// Back on SBG from Solar only once the sun left today could refill this
+/// many points, so a thin margin doesn't flip the mode back and forth.
+const LEND_BACK_PTS: f64 = 5.0;
+const LEND_STEP_MINUTES: i64 = 15;
+/// The house may draw the battery this far above the floor by day, when the
+/// sun left today refills it.
+const LEND_FLOOR_MARGIN_PTS: f64 = 5.0;
 /// The forecast looks this many hours ahead (this hour included); its peak
 /// radiation says whether the sun is coming.
 const OUTLOOK_HOURS: i64 = 3;
@@ -119,8 +131,8 @@ const STARTUP_RECHECK: Duration = Duration::from_secs(10);
 /// battery early when it holds at least this much.
 const EARLY_START_MIN_SOC: f64 = 60.0;
 const GEYSER_REMOTE_RECHECK: Duration = Duration::from_secs(600);
-const EV_RECHECK_RANGE: (f64, f64) = (30.0, 240.0);
-const EV_RETRY_MINUTES: i64 = 30;
+const LOADS_AI_ATTEMPTS: usize = 2;
+const LOADS_RECENT_MINUTES: i64 = 90;
 
 pub fn spawn(
     state: AutomationState,
@@ -141,6 +153,7 @@ pub fn spawn(
             let config = state.config().await;
             let settings = crate::storage::load_app_settings(&app);
             let services = Services {
+                app: &app,
                 client: &client,
                 battery: &battery,
                 scooter: &scooter,
@@ -160,6 +173,7 @@ pub fn spawn(
 }
 
 struct Services<'a> {
+    app: &'a AppHandle,
     client: &'a SolarClient,
     battery: &'a BatteryState,
     scooter: &'a ScooterState,
@@ -294,6 +308,7 @@ struct Context {
     samples: Vec<Sample>,
     profile: NightProfile,
     day_profile: Vec<history::HourLoad>,
+    day_base: Vec<history::HourLoad>,
     outages: Vec<Outage>,
     outcomes: Vec<history::NightOutcome>,
     solar_days: Vec<history::DaySolar>,
@@ -301,12 +316,18 @@ struct Context {
     weather: Option<WeatherSummary>,
     standby_drain_a: f64,
     draw_ratio: f64,
+    pv_ratio: f64,
+    /// Today's expected panel output, pulled towards the last readings.
+    today_pv: Vec<solar::PvPoint>,
+    /// The last half hour's panels against the forecast (1.0 = as forecast).
+    sky_factor: Option<f64>,
 }
 
 impl Context {
     fn build(clock: Clock, latitude: f64, samples: Vec<Sample>, forecast: Option<Forecast>, config: &AutomationConfig) -> Self {
         let profile = history::night_profile(&samples, clock.night(), HISTORY_NIGHTS);
         let day_profile = history::day_profile(&samples, clock.now.date(), RECENT_DAYS);
+        let day_base = history::day_base_profile(&samples, clock.now.date(), RECENT_DAYS);
         let outages = history::outages(&samples, clock.now - chrono::Duration::days(RECENT_DAYS));
         let solar_days = history::daily_solar(&samples, clock.now.date(), RECENT_DAYS + 1);
         let outcomes = history::night_outcomes(&samples, clock.night(), HISTORY_NIGHTS);
@@ -315,7 +336,26 @@ impl Context {
         let draw_ratio = history::draw_ratio(&samples, clock.now - chrono::Duration::days(RECENT_DAYS))
             .unwrap_or(DRAW_RATIO_FALLBACK)
             .clamp(DRAW_RATIO_RANGE.0, DRAW_RATIO_RANGE.1);
+        let pv_ratio = forecast
+            .as_ref()
+            .and_then(|forecast| {
+                loads::pv_ratio(&samples, forecast, config.pv_array_watts, clock.now - chrono::Duration::days(RECENT_DAYS))
+            })
+            .unwrap_or_else(loads::default_pv_ratio);
+        let mut today_pv = Vec::new();
+        let mut sky_factor = None;
         let weather = forecast.as_ref().map(|forecast| {
+            let shape = solar::PvShape::learn(
+                &samples,
+                forecast,
+                config.pv_array_watts,
+                pv_ratio,
+                clock.now - chrono::Duration::days(PV_SHAPE_DAYS),
+                clock.sunrise_today,
+                clock.sunset_today,
+            );
+            sky_factor = solar::live_factor(&shape, forecast, config.pv_array_watts, &samples, clock.now);
+            today_pv = solar::expected_today(&shape, forecast, config.pv_array_watts, sky_factor, clock.now);
             weather::summarize(
                 forecast,
                 SummaryInput {
@@ -324,7 +364,10 @@ impl Context {
                     night: clock.night(),
                     sunset: clock.sunset_today,
                     pv_array_watts: config.pv_array_watts,
+                    pv_ratio,
                     solar_history: &solar_days,
+                    today_pv: today_pv.clone(),
+                    today_measured: solar::measured_today(&samples, clock.now),
                 },
             )
         });
@@ -334,6 +377,7 @@ impl Context {
             samples,
             profile,
             day_profile,
+            day_base,
             outages,
             outcomes,
             solar_days,
@@ -341,6 +385,9 @@ impl Context {
             weather,
             standby_drain_a,
             draw_ratio,
+            pv_ratio,
+            today_pv,
+            sky_factor,
         }
     }
 }
@@ -588,6 +635,11 @@ struct DayMemory {
     ai_failure_notified: bool,
     low_pv_since: Option<NaiveDateTime>,
     low_pv_notified: bool,
+    /// Battery drain while the grid is off, for the outage warning.
+    outage_drain: VecDeque<(NaiveDateTime, f64)>,
+    outage_warned_at: Option<NaiveDateTime>,
+    /// Since when, on Solar, the sun left today could refill enough to lend.
+    lend_since: Option<NaiveDateTime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -682,11 +734,12 @@ async fn ensure_sun(memory: &mut EngineMemory, agent: &dyn AgentRunner, latitude
     Ok(info)
 }
 
-async fn refresh_weather(memory: &mut EngineMemory, http: &reqwest::Client, latitude: f64, longitude: f64) {
-    let fresh = memory.weather.as_ref().is_some_and(|cache| {
-        same_place((cache.latitude, cache.longitude), (latitude, longitude)) && age(cache.fetched_at) < WEATHER_REFRESH
-    });
-    if fresh || memory.weather_failed_at.is_some_and(|at| age(at) < WEATHER_RETRY) {
+async fn refresh_weather(memory: &mut EngineMemory, http: &reqwest::Client, latitude: f64, longitude: f64, force: bool) {
+    let fresh = !force
+        && memory.weather.as_ref().is_some_and(|cache| {
+            same_place((cache.latitude, cache.longitude), (latitude, longitude)) && age(cache.fetched_at) < WEATHER_REFRESH
+        });
+    if fresh || (!force && memory.weather_failed_at.is_some_and(|at| age(at) < WEATHER_RETRY)) {
         return;
     }
     match weather::fetch(http, latitude, longitude).await {
@@ -858,7 +911,8 @@ async fn tick(
         })
         .await;
 
-    refresh_weather(memory, services.weather_http, latitude, longitude).await;
+    let force_weather = state.refresh_forecast.swap(false, std::sync::atomic::Ordering::SeqCst);
+    refresh_weather(memory, services.weather_http, latitude, longitude, force_weather).await;
     let clock = Clock::for_today(
         now,
         sunrise_today,
@@ -932,11 +986,12 @@ async fn water_reminder(
             pv_w: reading.pv_w,
             load_w: reading.load_w,
             forecast: ctx.forecast.as_ref(),
+            pv_ratio: ctx.pv_ratio,
             config,
             done_on,
         },
     );
-    if let Some(body) = &step.notify {
+    if let Some(body) = step.notify.as_ref().filter(|_| !memory.loads.ai_live(ctx.clock.now)) {
         notifier.send(water::TITLE, body);
     }
     state.set_status(|status| status.water = step.status).await;
@@ -967,19 +1022,20 @@ async fn loads_reminder(
             .last()
             .map(|point| (100.0 - point.soc).max(0.0))
     });
-    let pv_ratio = ctx
-        .forecast
-        .as_ref()
-        .and_then(|forecast| {
-            loads::pv_ratio(&ctx.samples, forecast, config.pv_array_watts, reading.max_charge_a, now - chrono::Duration::days(RECENT_DAYS))
-        })
-        .unwrap_or_else(loads::default_pv_ratio);
-    let typical = |hour: u32| typical_day_load(ctx, hour);
+    let typical = |hour: u32| base_day_load(ctx, hour).or_else(|| typical_day_load(ctx, hour));
     let water_pending =
         config.water_reminder_enabled && state.water_done_on().await != Some(today) && now.hour() < config.water_end_hour;
     let geyser_done_on = state.geyser_done_on().await;
     let ev_skip_on = state.ev_skip_on().await;
+    let hotplate_on = state.hotplate_on().await;
+    let hotplate_skip_on = state.hotplate_skip_on().await;
+    let ev_checked_on = state.ev_checked_on().await;
+    let generation = state.loads_generation.load(std::sync::atomic::Ordering::SeqCst);
+    let answer = state.loads_answer.lock().await.take();
+    let edits = std::mem::take(&mut *state.loads_edits.lock().await);
+    let recent_from = ctx.samples.partition_point(|sample| sample.at < now - chrono::Duration::minutes(LOADS_RECENT_MINUTES));
     let ev_reader_busy = scooter.busy().await;
+    let grid_before = memory.loads.grid_now().is_some();
     let step = loads::step(
         &mut memory.loads,
         &LoadsInput {
@@ -994,13 +1050,22 @@ async fn loads_reminder(
             pv_w: reading.pv_w,
             load_w: reading.load_w,
             forecast: ctx.forecast.as_ref(),
-            pv_ratio,
+            pv_ratio: ctx.pv_ratio,
+            pv_curve: &ctx.today_pv,
+            sky_factor: ctx.sky_factor,
             typical_load: &typical,
             tonight_needs_soc,
             config,
             water_pending,
             geyser_done_on,
             ev_skip_on,
+            hotplate_on,
+            hotplate_skip_on,
+            ev_checked_on,
+            answer,
+            edits: &edits,
+            ai_available: agent::missing_key_reason().is_none(),
+            recent: &ctx.samples[recent_from..],
             ev_reading,
             ev_reader_busy,
             remote_ready,
@@ -1016,15 +1081,31 @@ async fn loads_reminder(
     if let Some(power_cycle) = step.ev_read {
         spawn_scooter_read(state, services, config, power_cycle);
     }
+    if step.ev_checked {
+        match crate::storage::save_day(services.app, "ev_checked_on", Some(today)) {
+            Ok(()) => *state.ev_checked_on.lock().await = Some(today),
+            Err(error) => tracing::warn!("could not save today's scooter check: {error}"),
+        }
+    }
+    if step.hotplate_cooked {
+        match crate::storage::save_hotplate_on(services.app, today) {
+            Ok(()) => *state.hotplate_on.lock().await = Some(today),
+            Err(error) => tracing::warn!("could not save today's cooking day: {error}"),
+        }
+    }
     let mut next_at = step.next_at;
-    if let Some(input) = step.ev_input {
-        ask_ev(state, services.agent, &mut memory.loads, input, now).await;
+    if memory.loads.grid_now().is_some() != grid_before {
         next_at = Some(now);
     }
     let mut status = step.status;
     status.ev.reading = scooter.busy().await;
     status.ev.read_error = scooter.last_error().await;
     state.set_status(|current| current.loads = status).await;
+    if let Some((input, checker)) = step.ai_request {
+        crate::events::emit(services.app, crate::events::AUTOMATION_STATUS, state.status().await);
+        ask_loads(state, services.agent, &mut memory.loads, input, checker, reading.load_w, now, generation).await;
+        next_at = Some(now);
+    }
     next_at
 }
 
@@ -1089,51 +1170,78 @@ fn spawn_scooter_read(state: &AutomationState, services: &Services<'_>, config: 
     });
 }
 
-async fn ask_ev(state: &AutomationState, agent: &dyn AgentRunner, memory: &mut LoadsMemory, input: agent::EvInput, now: NaiveDateTime) {
-    if let Some(reason) = agent::missing_key_reason() {
-        tracing::info!("scooter decision uses the app's rule: {reason}");
-        memory.ev_ask_failed(now + chrono::Duration::minutes(EV_RETRY_MINUTES));
-        return;
-    }
-    let soc = input.soc;
-    match agent.run_ev(input).await {
-        Ok(plan) => {
-            let recheck = if plan.recheck_minutes.is_finite() { plan.recheck_minutes } else { EV_RECHECK_RANGE.0 };
-            let recheck = recheck.clamp(EV_RECHECK_RANGE.0, EV_RECHECK_RANGE.1).round() as i64;
-            let decision = EvDecision {
-                charge: EvCharge::parse(&plan.charge_today),
-                reason: plan.reason,
-                model: plan.model,
-                at: now,
-                soc,
-                recheck_at: now + chrono::Duration::minutes(recheck),
-            };
-            let mode = match decision.charge {
-                EvCharge::Yes => "scooter_charge",
-                EvCharge::IfSpare => "scooter_if_spare",
-                EvCharge::No => "scooter_skip",
-            };
-            let row = DecisionRow {
-                at: now,
-                window: Window::Day.label().into(),
-                mode: mode.into(),
-                reserve_soc: None,
-                recheck_minutes: Some(recheck as u32),
-                confidence: None,
-                dry_run: false,
-                applied: false,
-                reason: decision.reason.clone(),
-                model: decision.model.clone(),
-            };
-            if let Err(error) = state.history.append_decision(&row) {
-                tracing::warn!("could not record scooter decision: {error}");
+/// Asks the AI for the loads, checks the answer, and sends it back once with
+/// the problems before falling back to the app's own plan.
+async fn ask_loads(
+    state: &AutomationState,
+    agent: &dyn AgentRunner,
+    memory: &mut LoadsMemory,
+    mut input: agent::LoadsAiInput,
+    checker: loads::Checker,
+    load_w: Option<f64>,
+    now: NaiveDateTime,
+    generation: u64,
+) {
+    let first_today = !memory.ai_decided_today(now);
+    let mut rejected = None;
+    for attempt in 1..=LOADS_AI_ATTEMPTS {
+        let changed = state.loads_changed.notified();
+        if state.loads_generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
+            return;
+        }
+        let answer = tokio::select! {
+            answer = agent.run_loads(input.clone()) => answer,
+            _ = changed => {
+                tracing::info!("loads AI round dropped: the family changed a load");
+                return;
             }
-            memory.record_ev_decision(decision);
+        };
+        let decision = match answer {
+            Ok(decision) => decision,
+            Err(error) => {
+                tracing::warn!("loads AI failed: {error}");
+                memory.ai_failed(now);
+                return;
+            }
+        };
+        match checker.check(&decision) {
+            Ok(verified) => {
+                let scooter_changed = memory.scooter_first_today(now) != Some(decision.scooter_first);
+                memory.apply_ai(verified, &decision, load_w, now);
+                if first_today || scooter_changed {
+                    let mode = if decision.scooter_first { "loads_scooter_first" } else { "loads" };
+                    record_loads_decision(state, now, mode, &decision.reason, decision.model.clone());
+                }
+                return;
+            }
+            Err(problems) => {
+                tracing::warn!("loads AI answer {attempt} failed the checks: {}", problems.join(" | "));
+                input.problems = problems.clone();
+                rejected = Some((decision, problems));
+            }
         }
-        Err(error) => {
-            tracing::warn!("scooter decision agent failed: {error}");
-            memory.ev_ask_failed(now + chrono::Duration::minutes(EV_RETRY_MINUTES));
-        }
+    }
+    if let Some((decision, problems)) = rejected {
+        record_loads_decision(state, now, "loads_fallback", &problems.join(" "), decision.model.clone());
+        memory.ai_rejected(now, problems, decision.reason, decision.model);
+    }
+}
+
+fn record_loads_decision(state: &AutomationState, now: NaiveDateTime, mode: &str, reason: &str, model: Option<String>) {
+    let row = DecisionRow {
+        at: now,
+        window: Window::Day.label().into(),
+        mode: mode.into(),
+        reserve_soc: None,
+        recheck_minutes: None,
+        confidence: None,
+        dry_run: false,
+        applied: false,
+        reason: reason.into(),
+        model,
+    };
+    if let Err(error) = state.history.append_decision(&row) {
+        tracing::warn!("could not record the loads decision: {error}");
     }
 }
 
@@ -1240,7 +1348,10 @@ fn record_drain(night: &mut NightMemory, reading: &EngineReading, config: &Autom
     let Some(amps) = battery_drain_a(night, reading, config.dry_run) else {
         return;
     };
-    let samples = &mut night.drain_samples;
+    push_drain(&mut night.drain_samples, amps, config, now);
+}
+
+fn push_drain(samples: &mut VecDeque<(NaiveDateTime, f64)>, amps: f64, config: &AutomationConfig, now: NaiveDateTime) {
     if samples
         .back()
         .is_some_and(|(at, _)| now - *at > chrono::Duration::minutes(SMART_LOAD_MAX_GAP_MINUTES))
@@ -1316,7 +1427,51 @@ async fn apply_smart_load(engine: &Engine<'_>, memory: &mut EngineMemory, readin
     let now = ctx.clock.now;
     let config = engine.config;
     let (enable, reason) = match memory.window? {
-        Window::Day => (false, "disable smart load for the day — plenty of sun, so everything can run".to_string()),
+        Window::Day => {
+            let day = &mut memory.day;
+            if reading.grid_on() != Some(false) {
+                day.outage_drain.clear();
+                day.outage_warned_at = None;
+                let reason = if day.smart_load_applied == Some(true) {
+                    "disable smart load — the grid is back, so everything can run"
+                } else {
+                    "disable smart load for the day — plenty of sun, so everything can run"
+                };
+                (false, reason.to_string())
+            } else if day.smart_load_applied == Some(true) || reading.smart_load == Some(true) {
+                return None;
+            } else {
+                let amps = reading
+                    .battery_a
+                    .map(|amps| (-amps).max(0.0))
+                    .or_else(|| estimate_discharge_a(reading.load_w, reading.pv_w, reading.batt_v));
+                if let Some(amps) = amps {
+                    push_drain(&mut day.outage_drain, amps, config, now);
+                }
+                let Some(average) = sustained_drain(&day.outage_drain, now, config) else {
+                    return Some(SMART_LOAD_POLL);
+                };
+                let minutes = config.smart_load_drain_minutes;
+                match day.outage_warned_at {
+                    None => {
+                        day.outage_warned_at = Some(now);
+                        let message = format!(
+                            "The grid is off and the battery is carrying about {average:.0} A. Switch off the geyser, the scooter charger and other heavy things — if it stays this high for {minutes} more minutes, Smart load goes on and cuts them."
+                        );
+                        engine.state.notify_event(message.clone()).await;
+                        engine.notifier.send("Grid off", &message);
+                        return Some(SMART_LOAD_POLL);
+                    }
+                    Some(at) if now - at < chrono::Duration::minutes(minutes as i64) => return Some(SMART_LOAD_POLL),
+                    Some(_) => (
+                        true,
+                        format!(
+                            "enable smart load — the grid is off and the battery still drains about {average:.0} A after the warning, so heavy and non-UPS loads are cut to protect it"
+                        ),
+                    ),
+                }
+            }
+        }
         Window::Night => {
             let night = &mut memory.night;
             if night.boost.is_some() || night_soc(night, reading, config.dry_run).is_none() {
@@ -1485,23 +1640,62 @@ fn weather_brief(summary: &WeatherSummary, today: NaiveDate) -> WeatherBrief {
         }),
         recent_avg_radiation_kwh_m2: summary.recent_avg_radiation_kwh_m2,
         recent_days: recent_day_rows(summary),
+        refill: refill_summary(summary),
         tonight_min_temp_c: summary.tonight_min_temp_c,
         recent_nights_min_temp_c: summary.recent_nights_min_temp_c,
         expected_pv_kwh_next_day: summary.expected_pv_kwh_next_day,
     }
 }
 
+fn recent_day_row(day: &weather::RecentDay) -> RecentDayRow {
+    RecentDayRow {
+        date: day.date.format("%a %d %b").to_string(),
+        radiation_kwh_m2: day.radiation_kwh_m2.map(round1),
+        cloud_pct: day.cloud_pct.map(f64::round),
+        rain_prob_pct: day.rain_prob_pct.map(f64::round),
+        morning_low_soc: day.morning_low_soc.map(f64::round),
+        max_soc: day.max_soc.map(f64::round),
+        full_at: day.full_at.clone(),
+    }
+}
+
 fn recent_day_rows(summary: &WeatherSummary) -> Vec<RecentDayRow> {
-    summary
-        .recent_days
-        .iter()
-        .map(|day| RecentDayRow {
-            date: day.date.format("%a %d %b").to_string(),
-            radiation_kwh_m2: day.radiation_kwh_m2,
-            max_soc: day.max_soc,
-            full_at: day.full_at.clone(),
+    summary.recent_days.iter().map(recent_day_row).collect()
+}
+
+fn refill_summary(summary: &WeatherSummary) -> Option<RefillSummary> {
+    let recorded: Vec<&weather::RecentDay> = summary.recent_days.iter().filter(|day| day.max_soc.is_some()).collect();
+    if recorded.is_empty() {
+        return None;
+    }
+    let full: Vec<&weather::RecentDay> = recorded.iter().copied().filter(|day| day.full_at.is_some()).collect();
+    let lowest_by = |key: fn(&weather::RecentDay) -> Option<f64>| {
+        full.iter().copied().filter_map(|day| key(day).map(|value| (day, value))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(day, _)| day)
+    };
+    Some(RefillSummary {
+        days: recorded.len(),
+        full_days: full.len(),
+        latest_full_at: full.iter().filter_map(|day| day.full_at.clone()).max(),
+        lowest_start_filled: full.iter().filter_map(|day| day.morning_low_soc).reduce(f64::min).map(f64::round),
+        darkest_full: lowest_by(|day| day.radiation_kwh_m2).map(recent_day_row),
+        wettest_full: lowest_by(|day| day.rain_prob_pct.map(|pct| -pct)).filter(|day| day.rain_prob_pct.is_some_and(|pct| pct > 0.0)).map(recent_day_row),
+    })
+}
+
+/// Hours of an outage between midnight and the sun taking over: by then the
+/// battery is usually down at its reserve, so only the reserve carries them.
+fn before_sun_hours(start: NaiveDateTime, minutes: f64, take_over: chrono::NaiveTime) -> f64 {
+    let end = start + chrono::Duration::seconds((minutes * 60.0).round() as i64);
+    [Some(start.date()), start.date().succ_opt()]
+        .into_iter()
+        .flatten()
+        .filter_map(|day| {
+            let from = day.and_hms_opt(0, 0, 0)?;
+            let until = day.and_time(take_over);
+            let overlap = end.min(until) - start.max(from);
+            (overlap > chrono::Duration::zero()).then(|| overlap.num_minutes() as f64 / 60.0)
         })
-        .collect()
+        .sum()
 }
 
 fn build_night_input(
@@ -1535,6 +1729,10 @@ fn build_night_input(
         })
         .collect();
 
+    let min_reserve = standby_reserve(ctx, reading, config);
+    let soc_per_backup_hour = soc_per_hour_at(sleeping_load_w(&ctx.profile).unwrap_or(load_now), reading.rated_capacity_ah, volts);
+    let take_over = (ctx.clock.sunrise_today + ctx.clock.morning_buffer).time();
+
     NightInput {
         now: now.format("%a %d %b %Y, %H:%M").to_string(),
         coming_day: relative_day(ctx.clock.next_solar_day(), now.date()),
@@ -1550,7 +1748,7 @@ fn build_night_input(
         rated_capacity_ah: reading.rated_capacity_ah,
         battery_v: reading.batt_v,
         floor_soc: config.min_soc_percent,
-        min_reserve_soc: standby_reserve(ctx, reading, config),
+        min_reserve_soc: min_reserve,
         standby_drain_a: round1(ctx.standby_drain_a),
         load_w: reading.load_w.map(f64::round),
         pv_w: reading.pv_w.map(f64::round),
@@ -1570,14 +1768,21 @@ fn build_night_input(
             })
             .collect(),
         trajectory_basis: basis.into(),
-        soc_per_backup_hour: soc_per_hour_at(sleeping_load_w(&ctx.profile).unwrap_or(load_now), reading.rated_capacity_ah, volts)
-            .map(|pct| (pct * 10.0).round() / 10.0),
+        soc_per_backup_hour: soc_per_backup_hour.map(round1),
         outages: ctx
             .outages
             .iter()
-            .map(|outage| OutageRow {
-                when: outage.start.format("%a %d %b, %H:%M").to_string(),
-                minutes: outage.minutes.round(),
+            .map(|outage| {
+                let hours = before_sun_hours(outage.start, outage.minutes, take_over);
+                OutageRow {
+                    when: outage.start.format("%a %d %b, %H:%M").to_string(),
+                    minutes: outage.minutes.round(),
+                    before_sun_hours: round1(hours),
+                    reserve_to_cover: (hours > 0.0)
+                        .then_some(soc_per_backup_hour)
+                        .flatten()
+                        .map(|pct| (min_reserve + hours * pct).ceil().min(MAX_RESERVE_SOC)),
+                }
             })
             .collect(),
         weather: ctx.weather.as_ref().map(|summary| weather_brief(summary, now.date())),
@@ -2164,6 +2369,7 @@ async fn on_battery_ai_failure(engine: &Engine<'_>, memory: &mut EngineMemory, e
 fn day_projection(ctx: &Context, reading: &EngineReading, config: &AutomationConfig) -> Option<DayProjection> {
     let soc = reading.soc?;
     let radiation = |at: NaiveDateTime| ctx.forecast.as_ref().and_then(|forecast| forecast.radiation_during(at));
+    let pv_curve = |at: NaiveDateTime| solar::curve_at(&ctx.today_pv, at);
     let typical = |hour: u32| typical_day_load(ctx, hour);
     Some(project_day(DayProjectionInput {
         now: ctx.clock.now,
@@ -2175,8 +2381,10 @@ fn day_projection(ctx: &Context, reading: &EngineReading, config: &AutomationCon
         max_charge_a: reading.max_charge_a,
         pv_now_w: reading.pv_w,
         pv_array_watts: config.pv_array_watts,
+        pv_ratio: ctx.pv_ratio,
         current_load_w: reading.load_w,
         radiation_during: &radiation,
+        pv_during: (!ctx.today_pv.is_empty()).then_some(&pv_curve as &dyn Fn(NaiveDateTime) -> Option<f64>),
         typical_load_for_hour: &typical,
     }))
 }
@@ -2247,6 +2455,11 @@ fn sun_is_done(ctx: &Context, reading: &EngineReading) -> bool {
 
 fn typical_day_load(ctx: &Context, hour: u32) -> Option<f64> {
     ctx.day_profile.iter().find(|h| h.hour == hour).map(|h| h.load_w)
+}
+
+/// The house without the flexible loads, which the loads planner adds itself.
+fn base_day_load(ctx: &Context, hour: u32) -> Option<f64> {
+    ctx.day_base.iter().find(|h| h.hour == hour).map(|h| h.load_w)
 }
 
 async fn switch_day_mode(
@@ -2320,6 +2533,7 @@ async fn watch_low_pv(engine: &Engine<'_>, day: &mut DayMemory, reading: &Engine
 async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &EngineReading, ctx: &Context) -> Duration {
     let config = engine.config;
     let now = ctx.clock.now;
+    let grid_loads = memory.loads.grid_now().map(str::to_string);
     let day = &mut memory.day;
     if day.paused {
         engine.set_phase(Phase::Paused).await;
@@ -2349,7 +2563,23 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
         return normal_interval(config);
     }
 
-    let Some(seen) = sky_now(day.effective_mode, reading) else {
+    if let Some(loads) = grid_loads.filter(|_| reading.grid_on() == Some(true)) {
+        let verb = if loads.contains(" and ") { "need" } else { "needs" };
+        let reason = format!(
+            "Solar mode — {loads} {verb} more than the sun gives, and the battery can't lend it and still be full by sunset, so the grid tops it up."
+        );
+        if day.effective_mode != Some(SOLAR_MODE) {
+            let notice = format!("switch to Solar — {loads} {verb} more than the sun gives; the grid tops it up so the battery stays for tonight");
+            if switch_day_mode(engine, day, reading, now, SOLAR_MODE, &notice).await {
+                engine.record(now, Window::Day, "solar", None, None, None, true, &reason);
+            }
+        }
+        day.next_check_at = None;
+        engine.set_reason(&reason).await;
+        return normal_interval(config);
+    }
+
+    let Some(seen) = sky_now(day.effective_mode, ctx, reading) else {
         engine.set_reason("Waiting for a solar reading from the inverter.").await;
         return normal_interval(config);
     };
@@ -2358,6 +2588,9 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
         _ => now,
     };
     day.sky = Some((seen, since));
+    if let Some(lend) = lend_budget(ctx, reading, config) {
+        return day_by_budget(engine, day, reading, now, seen, lend).await;
+    }
     let outlook = sun_outlook(ctx);
     let (target, wait) = match seen {
         Sky::Sun => (SBG_MODE, Some(SUN_BACK_MINUTES)),
@@ -2421,6 +2654,138 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
     normal_interval(config)
 }
 
+/// How many points the battery can give the house now and still be brought
+/// back to full by the sun left today (live-corrected), down to a little above
+/// the floor. Below zero, the sun left can't fill it even without lending.
+/// `None` without the panel size or a forecast.
+fn lend_budget(ctx: &Context, reading: &EngineReading, config: &AutomationConfig) -> Option<f64> {
+    if config.pv_array_watts <= 0.0 || ctx.today_pv.is_empty() || reading.rated_capacity_ah <= 0.0 {
+        return None;
+    }
+    let soc = reading.soc?;
+    let volts = pack_volts(reading);
+    let per_ah = soc_per_ah(reading.rated_capacity_ah);
+    let sunset = ctx.clock.sunset_today;
+    let mut steps = Vec::new();
+    let mut at = ctx.clock.now;
+    while at < sunset {
+        let end = (at + chrono::Duration::minutes(LEND_STEP_MINUTES)).min(sunset);
+        let middle = at + (end - at) / 2;
+        let pv = solar::curve_at(&ctx.today_pv, middle).unwrap_or(0.0);
+        let house = typical_day_load(ctx, middle.hour()).or(reading.load_w).unwrap_or(0.0);
+        steps.push((pv - house, (end - at).num_seconds() as f64 / 3600.0));
+        at = end;
+    }
+    let refill = |start: f64| {
+        steps.iter().fold(start, |level, (net, hours)| {
+            if *net <= 0.0 {
+                return level;
+            }
+            let amps = reading.max_charge_a.map_or(net / volts, |max| (net / volts).min(max));
+            (level + amps * hours * per_ah).min(100.0)
+        })
+    };
+    let refilled = refill(soc);
+    if refilled < FULL_SOC {
+        return Some(refilled - FULL_SOC);
+    }
+    let most = (soc - (config.min_soc_percent + LEND_FLOOR_MARGIN_PTS)).max(0.0);
+    if refill(soc - most) >= FULL_SOC {
+        return Some(most);
+    }
+    let (mut ok, mut short) = (0.0, most);
+    for _ in 0..30 {
+        let middle = (ok + short) / 2.0;
+        if refill(soc - middle) >= FULL_SOC {
+            ok = middle;
+        } else {
+            short = middle;
+        }
+    }
+    Some(ok)
+}
+
+fn lend_text(lend: f64) -> String {
+    if lend < 1.0 { "under 1%".into() } else { format!("about {lend:.0}%") }
+}
+
+/// The family's rule for the house by day: the battery lends (SBG) only as
+/// much as the sun left today can put back; once it can't, Solar mode so the
+/// grid carries the house. Back to SBG only with a few points to spare.
+async fn day_by_budget(
+    engine: &Engine<'_>,
+    day: &mut DayMemory,
+    reading: &EngineReading,
+    now: NaiveDateTime,
+    seen: Sky,
+    lend: f64,
+) -> Duration {
+    let config = engine.config;
+    let pv = reading.pv_w.unwrap_or_default().round();
+    if day.effective_mode == Some(SOLAR_MODE) {
+        if lend < LEND_BACK_PTS {
+            day.lend_since = None;
+            day.next_check_at = None;
+            let reason = if lend <= 0.0 {
+                "Solar mode — the sun left today can't refill the battery if it lends, so the grid carries the house; spare sun still charges it.".to_string()
+            } else {
+                format!(
+                    "Solar mode — the sun left today could refill only {}, so the grid carries the house; spare sun still charges the battery.",
+                    lend_text(lend)
+                )
+            };
+            engine.set_reason(&reason).await;
+            return normal_interval(config);
+        }
+        let back_at = *day.lend_since.get_or_insert(now) + chrono::Duration::minutes(SUN_BACK_MINUTES);
+        if now < back_at {
+            day.next_check_at = Some(back_at);
+            let reason = format!(
+                "The sun left today can refill {} — back to SBG at {} if it holds.",
+                lend_text(lend),
+                clock_time(back_at)
+            );
+            engine.set_reason(&reason).await;
+            return until(now, day.next_check_at, normal_interval(config));
+        }
+        let reason = format!("SBG — the sun left today can refill {}, so the battery carries the house again.", lend_text(lend));
+        let notice = format!("switch to SBG — the sun left today can refill {} of battery", lend_text(lend));
+        if switch_day_mode(engine, day, reading, now, SBG_MODE, &notice).await {
+            engine.record(now, Window::Day, "sbg", None, None, None, true, &reason);
+            day.lend_since = None;
+            day.next_check_at = None;
+        }
+        engine.set_reason(&reason).await;
+        return normal_interval(config);
+    }
+
+    day.lend_since = None;
+    day.next_check_at = None;
+    if seen == Sky::Sun {
+        engine
+            .set_reason("SBG — the sun and the battery carry the house. Short battery drains while the panels ramp up are normal.")
+            .await;
+        return normal_interval(config);
+    }
+    if lend > 0.0 {
+        let reason = format!(
+            "Cloudy ({pv} W) — the battery can lend {} more and the sun left today still refills it, so SBG stays.",
+            lend_text(lend)
+        );
+        engine.set_reason(&reason).await;
+        return normal_interval(config);
+    }
+    let reason = format!(
+        "Solar mode — at {pv} W the battery is draining and the sun left today can't refill any more, so the grid carries the house and the battery is kept for tonight."
+    );
+    let notice = "switch to Solar — the sun left today can't refill what the battery gives, so the grid carries the house";
+    if switch_day_mode(engine, day, reading, now, SOLAR_MODE, notice).await {
+        engine.record(now, Window::Day, "solar", None, None, None, true, &reason);
+    }
+    engine.set_reason(&reason).await;
+    normal_interval(config)
+}
+
 /// The unclear middle the rules can't settle: a grey or dark sky where the
 /// forecast is mixed, contradicts the sky, or is missing.
 fn needs_judgement(sky: Sky, outlook: Option<Outlook>) -> bool {
@@ -2457,6 +2822,9 @@ async fn ask_day_agent(
         return Some(until(now, day.next_check_at, normal_interval(config)));
     }
     if let Some(next) = day.ai_next_at.filter(|next| now < *next) {
+        if day.ai_failure_notified {
+            return None;
+        }
         day.next_check_at = Some(next);
         return Some(until(now, day.next_check_at, normal_interval(config)));
     }
@@ -2619,13 +2987,34 @@ fn build_day_input(
 /// while the battery is draining: with a full battery the panels are throttled
 /// to the load, so low PV alone means nothing. On Solar (the battery isn't
 /// carrying the house) the sun has to be clearly back.
-fn sky_now(effective: Option<u32>, reading: &EngineReading) -> Option<Sky> {
-    let pv = reading.pv_w?;
+fn sky_now(effective: Option<u32>, ctx: &Context, reading: &EngineReading) -> Option<Sky> {
+    let pv_now = reading.pv_w?;
+    let now = ctx.clock.now;
+    let since = now - chrono::Duration::minutes(SKY_WINDOW_MINUTES);
+    let recent: Vec<&Sample> = ctx.samples.iter().filter(|sample| sample.at > since && sample.at < now).collect();
+    let average = |values: Vec<f64>| (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64);
+    let pv = average(recent.iter().filter_map(|sample| sample.pv_w).chain([pv_now]).collect()).unwrap_or(pv_now);
+    let draining = if reading.mode == Some(SBG_MODE) {
+        reading.battery_a.is_some()
+            && average(recent.iter().filter_map(|sample| sample.battery_a).chain(reading.battery_a).collect())
+                .is_some_and(|amps| amps < -DAY_DRAIN_A)
+    } else {
+        let shortfall = |load: Option<f64>, pv: Option<f64>| load.zip(pv).map(|(load, pv)| load - pv);
+        shortfall(reading.load_w, reading.pv_w).is_some()
+            && average(
+                recent
+                    .iter()
+                    .filter_map(|sample| shortfall(sample.load_w, sample.pv_w))
+                    .chain(shortfall(reading.load_w, reading.pv_w))
+                    .collect(),
+            )
+            .is_some_and(|watts| watts > DAY_DRAIN_A * pack_volts(reading))
+    };
     let sky = if pv >= SUN_PV_W {
         Sky::Sun
     } else if effective == Some(SOLAR_MODE) {
         if pv < NO_SUN_PV_W { Sky::Dark } else { Sky::Grey }
-    } else if !draining_on_sbg(reading) {
+    } else if !draining {
         Sky::Sun
     } else if pv < NO_SUN_PV_W {
         Sky::Dark
@@ -2635,11 +3024,15 @@ fn sky_now(effective: Option<u32>, reading: &EngineReading) -> Option<Sky> {
     Some(sky)
 }
 
+/// The next few hours' sun, scaled by how the panels compare with the
+/// forecast right now.
 fn sun_outlook(ctx: &Context) -> Option<Outlook> {
     let forecast = ctx.forecast.as_ref()?;
+    let factor = ctx.sky_factor.unwrap_or(1.0);
     let peak = (0..OUTLOOK_HOURS)
         .filter_map(|hours| forecast.radiation_during(ctx.clock.now + chrono::Duration::hours(hours)))
-        .reduce(f64::max)?;
+        .reduce(f64::max)?
+        * factor;
     Some(if peak < DARK_W_M2 {
         Outlook::Dark
     } else if peak >= SUNNY_W_M2 {
@@ -2740,7 +3133,10 @@ fn build_insights(
             tonight: history::tonight_hourly(&ctx.samples, clock.night()),
             quiet_by: ctx.profile.quiet_by(config.night_start_hour),
         },
-        weather: ctx.weather.clone(),
+        weather: ctx.weather.clone().map(|mut summary| {
+            summary.fetched_at = memory.weather.as_ref().map(|cache| cache.fetched_at.with_timezone(&Local).naive_local());
+            summary
+        }),
         outages: ctx.outages.clone(),
         day,
         records: RecordsInfo {
@@ -2847,8 +3243,8 @@ mod tests {
             Box::pin(async move { next.map_err(AgentError::ScriptFailed) })
         }
 
-        fn run_ev(&self, _input: agent::EvInput) -> BoxFuture<'_, Result<agent::EvPlan, AgentError>> {
-            Box::pin(async { Err(AgentError::ScriptFailed("no ev agent in tests".into())) })
+        fn run_loads(&self, _input: agent::LoadsAiInput) -> BoxFuture<'_, Result<agent::LoadsDecision, AgentError>> {
+            Box::pin(async { Err(AgentError::ScriptFailed("no loads agent in tests".into())) })
         }
     }
 
@@ -2890,7 +3286,7 @@ mod tests {
             };
             let dir = std::env::temp_dir().join(format!("solar-hub-runner-{}", uuid::Uuid::new_v4()));
             Self {
-                state: AutomationState::new(config.clone(), HistoryStore::new(dir.clone()), None, None, None),
+                state: AutomationState::new(config.clone(), HistoryStore::new(dir.clone()), crate::automation::SavedDays::default()),
                 client: SolarClient::new(SolarCredentials::default()),
                 notifier: FakeNotifier::default(),
                 config,
@@ -3489,6 +3885,105 @@ mod tests {
         assert_eq!(stays_grey.day.effective_mode, Some(SOLAR_MODE));
     }
 
+    fn with_sun_curve(now: NaiveDateTime, watts: impl Fn(u32) -> f64) -> Context {
+        let mut context = ctx(now);
+        let midnight = now.date().and_hms_opt(0, 0, 0).unwrap();
+        context.today_pv = (0..96)
+            .map(|step| {
+                let at = midnight + chrono::Duration::minutes(step * 15);
+                solar::PvPoint { at, watts: watts(at.hour()) }
+            })
+            .collect();
+        context
+    }
+
+    fn budget_harness() -> Harness {
+        let mut h = Harness::new(true);
+        h.config.pv_array_watts = 3000.0;
+        h
+    }
+
+    #[test]
+    fn the_battery_may_lend_what_the_sun_left_can_put_back() {
+        let config = AutomationConfig { pv_array_watts: 3000.0, ..AutomationConfig::default() };
+        let grey = sbg_reading(85.0, 400.0, 180.0, -5.0);
+        let sunny_later = with_sun_curve(at(26, 11, 0), |hour| if (12..15).contains(&hour) { 1400.0 } else { 150.0 });
+        let lend = lend_budget(&sunny_later, &grey, &config).unwrap();
+        assert!(lend > 5.0, "{lend}");
+        let dull = with_sun_curve(at(26, 14, 30), |_| 250.0);
+        assert!(lend_budget(&dull, &grey, &config).unwrap() < 0.0);
+        assert_eq!(lend_budget(&ctx(at(26, 14, 30)), &grey, &config), None);
+    }
+
+    #[tokio::test]
+    async fn a_cloudy_afternoon_the_sun_cant_refill_goes_to_solar_at_once() {
+        let h = budget_harness();
+        let agent = failing_day_agent();
+        let engine = h.engine(&agent);
+        let mut memory = day_memory(SBG_MODE);
+        let grey = sbg_reading(85.0, 400.0, 180.0, -5.0);
+        day_tick(&engine, &mut memory, &grey, &with_sun_curve(at(26, 14, 30), |_| 250.0)).await;
+        assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE));
+    }
+
+    #[tokio::test]
+    async fn a_cloudy_morning_lends_until_the_afternoon_sun_cant_refill_more() {
+        let h = budget_harness();
+        let agent = failing_day_agent();
+        let engine = h.engine(&agent);
+        let mut memory = day_memory(SBG_MODE);
+        let sunny_later = |hour: u32| if (12..15).contains(&hour) { 1400.0 } else { 150.0 };
+        let grey = sbg_reading(85.0, 400.0, 180.0, -5.0);
+        day_tick(&engine, &mut memory, &grey, &with_sun_curve(at(26, 10, 0), sunny_later)).await;
+        assert_eq!(memory.day.effective_mode, Some(SBG_MODE), "the afternoon sun refills what it lends");
+
+        let drained = sbg_reading(40.0, 400.0, 180.0, -5.0);
+        day_tick(&engine, &mut memory, &drained, &with_sun_curve(at(26, 10, 30), sunny_later)).await;
+        assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE), "the afternoon can't refill from 40%");
+    }
+
+    #[tokio::test]
+    async fn solar_goes_back_to_sbg_only_with_room_to_lend_for_15_minutes() {
+        let h = budget_harness();
+        let agent = failing_day_agent();
+        let engine = h.engine(&agent);
+        let mut memory = day_memory(SOLAR_MODE);
+        let on_solar = EngineReading { pv_w: Some(900.0), ..reading(85.0, SOLAR_MODE, 400.0) };
+        let thin = |_: u32| 450.0;
+        day_tick(&engine, &mut memory, &on_solar, &with_sun_curve(at(26, 15, 0), thin)).await;
+        assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE), "too little sun left to lend");
+
+        let sunny = |hour: u32| if hour < 15 { 1400.0 } else { 300.0 };
+        day_tick(&engine, &mut memory, &on_solar, &with_sun_curve(at(26, 11, 0), sunny)).await;
+        assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE));
+        assert_eq!(memory.day.next_check_at, Some(at(26, 11, 15)));
+        day_tick(&engine, &mut memory, &on_solar, &with_sun_curve(at(26, 11, 15), sunny)).await;
+        assert_eq!(memory.day.effective_mode, Some(SBG_MODE));
+    }
+
+    #[test]
+    fn one_bright_reading_doesnt_count_as_the_sun_coming_back() {
+        let now = at(26, 14, 30);
+        let mut dim = ctx(now);
+        dim.samples = (1..10)
+            .map(|minutes| Sample {
+                at: now - chrono::Duration::minutes(minutes),
+                soc: Some(85.0),
+                load_w: Some(400.0),
+                pv_w: Some(120.0),
+                battery_a: Some(-6.0),
+                battery_v: Some(51.2),
+                grid_on: Some(true),
+                grid_basis: "ac_input".into(),
+                mode: Some("SBG".into()),
+                source: "inverter+bms".into(),
+            })
+            .collect();
+        let spike = sbg_reading(85.0, 400.0, 520.0, 1.0);
+        assert_eq!(sky_now(Some(SBG_MODE), &dim, &spike), Some(Sky::Grey));
+        assert_eq!(sky_now(Some(SBG_MODE), &ctx(now), &spike), Some(Sky::Sun));
+    }
+
     #[tokio::test]
     async fn a_moment_of_sun_restarts_the_no_sun_wait() {
         let h = Harness::new(false);
@@ -3871,6 +4366,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_daytime_outage_warns_first_then_turns_smart_load_on() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let mut memory = day_memory(SBG_MODE);
+        let engine = h.engine(&agent);
+        let minutes = AutomationConfig::default().smart_load_drain_minutes;
+        let drain = vec![40.0; minutes as usize + 1];
+        drain_minutes(&engine, &mut memory, at(26, 11, 0), &drain, outage_drain).await;
+        assert!(memory.day.outage_warned_at.is_some());
+        assert_ne!(memory.day.smart_load_applied, Some(true), "the family gets a chance first");
+        assert!(h.notifier.sent.lock().unwrap().iter().any(|body| body.contains("The grid is off")));
+        drain_minutes(&engine, &mut memory, at(26, 11, minutes + 1), &drain, outage_drain).await;
+        assert_eq!(memory.day.smart_load_applied, Some(true));
+        apply_smart_load(&engine, &mut memory, &reading(80.0, SBG_MODE, 300.0), &ctx(at(26, 12, 0))).await;
+        assert_eq!(memory.day.smart_load_applied, Some(false), "the grid is back");
+    }
+
+    #[tokio::test]
+    async fn a_required_load_the_battery_cant_lend_holds_solar_mode() {
+        let h = Harness::new(true);
+        let agent = FakeAgent::new(vec![]);
+        let mut memory = day_memory(SBG_MODE);
+        memory.loads.set_grid_now(Some("the geyser"));
+        let engine = h.engine(&agent);
+        day_tick(&engine, &mut memory, &sbg_reading(70.0, 1100.0, 1500.0, 5.0), &ctx(at(26, 11, 0))).await;
+        assert_eq!(memory.day.effective_mode, Some(SOLAR_MODE));
+        assert!(h.decisions().iter().any(|row| row.mode == "solar" && row.reason.contains("the geyser needs more")));
+    }
+
+    #[tokio::test]
     async fn day_turns_smart_load_off_once_and_leaves_manual_changes_alone() {
         let h = Harness::new(true);
         let agent = FakeAgent::new(vec![]);
@@ -4004,5 +4529,53 @@ mod tests {
         memory.night.boosts = MAX_BOOSTS_PER_NIGHT;
         night_tick(&engine, &mut memory, &oven(3000.0), &ctx(at(26, 22, 0))).await;
         assert!(memory.night.boost.is_none());
+    }
+
+    #[test]
+    fn outage_hours_count_only_the_small_hours_before_the_sun_takes_over() {
+        let take_over = chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap();
+        let day = |d: u32, h: u32, m: u32| NaiveDate::from_ymd_opt(2026, 11, d).unwrap().and_hms_opt(h, m, 0).unwrap();
+        let hours = |start, minutes| (before_sun_hours(start, minutes, take_over) * 100.0).round() / 100.0;
+        assert_eq!(hours(day(10, 3, 45), 87.0), 1.45);
+        assert_eq!(hours(day(10, 20, 33), 142.0), 0.0);
+        assert_eq!(hours(day(10, 23, 30), 60.0), 0.5);
+        assert_eq!(hours(day(10, 12, 56), 65.0), 0.0);
+        assert_eq!(hours(day(8, 6, 35), 456.0), 1.42);
+    }
+
+    #[test]
+    fn refill_summary_finds_the_darkest_and_wettest_days_that_still_filled() {
+        let day = |d: u32, radiation: f64, rain: f64, low: f64, full_at: Option<&str>| weather::RecentDay {
+            date: NaiveDate::from_ymd_opt(2026, 11, d).unwrap(),
+            radiation_kwh_m2: Some(radiation),
+            cloud_pct: Some(50.0),
+            rain_prob_pct: Some(rain),
+            morning_low_soc: Some(low),
+            max_soc: Some(if full_at.is_some() { 100.0 } else { 80.0 }),
+            full_at: full_at.map(str::to_string),
+        };
+        let summary = WeatherSummary {
+            next_day: None,
+            recent_avg_radiation_kwh_m2: None,
+            recent_days: vec![
+                day(4, 4.5, 10.0, 24.0, Some("09:50")),
+                day(5, 2.1, 80.0, 17.0, Some("11:17")),
+                day(6, 3.0, 40.0, 30.0, Some("10:10")),
+                day(7, 1.0, 90.0, 40.0, None),
+            ],
+            tonight_min_temp_c: None,
+            recent_nights_min_temp_c: None,
+            expected_pv_kwh_next_day: None,
+            hours_until_sunset: Vec::new(),
+            today_pv: Vec::new(),
+            today_measured: Vec::new(),
+            fetched_at: None,
+        };
+        let refill = refill_summary(&summary).unwrap();
+        assert_eq!((refill.days, refill.full_days), (4, 3));
+        assert_eq!(refill.latest_full_at.as_deref(), Some("11:17"));
+        assert_eq!(refill.lowest_start_filled, Some(17.0));
+        assert_eq!(refill.darkest_full.unwrap().date, "Thu 05 Nov");
+        assert_eq!(refill.wettest_full.unwrap().rain_prob_pct, Some(80.0));
     }
 }

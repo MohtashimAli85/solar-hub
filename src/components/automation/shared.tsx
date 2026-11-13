@@ -45,6 +45,14 @@ export function automationPhaseLabel(phase: AutomationPhase): string {
 
 export const CHART_FONT = 11;
 
+/** A round tick step for an axis that tops out at `peak`. */
+export function chartStep(peak: number): number {
+  if (peak <= 1) return 0.5;
+  if (peak <= 3) return 1;
+  if (peak <= 6) return 2;
+  return 5;
+}
+
 export const VIZ = {
   accent: "var(--viz-accent)",
   context: "var(--viz-context)",

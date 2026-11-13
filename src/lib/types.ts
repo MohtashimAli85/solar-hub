@@ -95,14 +95,24 @@ export interface AutomationConfig {
   water_cloudy_soc: number;
   water_repeat_minutes: number;
   water_run_minutes: number;
+  day_low_soc: number;
   geyser_enabled: boolean;
   geyser_low_watts: number;
   geyser_high_watts: number;
   geyser_daily_kwh: number;
+  geyser_tank_litres: number;
   geyser_start_hour: number;
   geyser_end_hour: number;
   geyser_esp32_host: string;
   geyser_auto_control: boolean;
+  geyser_first_weekdays: number[];
+  geyser_first_below_c: number;
+  hotplate_enabled: boolean;
+  hotplate_watts: number;
+  hotplate_hours: number;
+  hotplate_start_hour: number;
+  hotplate_end_hour: number;
+  hotplate_every_days: number;
   ev_enabled: boolean;
   ev_battery_kwh: number;
   ev_charger_watts: number;
@@ -110,6 +120,10 @@ export interface AutomationConfig {
   ev_ble_name: string;
   ev_ble_mac: string;
   ev_power_cycle_reads: boolean;
+  ev_daily_check: boolean;
+  ev_check_minute: number;
+  ev_no_charge_above_pct: number;
+  ev_remind_minutes: number;
 }
 
 export type WaterPhase = "off" | "waiting" | "ready" | "done" | "missed";
@@ -121,9 +135,9 @@ export interface WaterStatus {
   last_reminded_at: LocalDateTime | null;
 }
 
-export type LoadKind = "water" | "geyser" | "ev";
+export type LoadKind = "water" | "geyser" | "ev" | "hotplate";
 
-export type LoadPhase = "off" | "waiting" | "ready" | "running" | "stop" | "done" | "skipped";
+export type LoadPhase = "off" | "waiting" | "ready" | "running" | "stop" | "done" | "skipped" | "ask";
 
 export interface LoadRow {
   phase: LoadPhase;
@@ -143,9 +157,19 @@ export interface GeyserStatus extends LoadRow {
   auto: boolean;
 }
 
-export type SocBasis = "read" | "live" | "estimated" | "full";
+export type SocBasis = "read" | "live" | "estimated" | "full" | "set";
 
-export type EvCharge = "yes" | "if_spare" | "no";
+export type EditState = "on" | "off" | "done";
+
+export interface LoadEdit {
+  load: LoadKind;
+  state: EditState;
+  watts: number | null;
+  kwh: number | null;
+  soc: number | null;
+}
+
+export type EvCharge = "yes" | "if_spare";
 
 export interface EvStatus extends LoadRow {
   soc: number | null;
@@ -157,6 +181,24 @@ export interface EvStatus extends LoadRow {
   decision_model: string | null;
   reading: boolean;
   read_error: string | null;
+  charge_check: string | null;
+  charge_today: boolean | null;
+  charge_rule: string | null;
+  checked_at: LocalDateTime | null;
+  check_failed: boolean;
+}
+
+export interface SunHour {
+  at: LocalDateTime;
+  sun_w: number;
+  house_w: number;
+  loads_w: number;
+}
+
+export interface HotplateStatus extends LoadRow {
+  cooking_day: boolean;
+  asking_w: number | null;
+  asking_since: LocalDateTime | null;
 }
 
 export interface LoadSlot {
@@ -165,17 +207,44 @@ export interface LoadSlot {
   end: LocalDateTime;
   watts: number;
   partial: boolean;
+  topped_up: boolean;
+}
+
+export type LoadsAiMode = "off" | "ai" | "fallback";
+
+export interface LoadsAiStatus {
+  mode: LoadsAiMode;
+  at: LocalDateTime | null;
+  reason: string | null;
+  model: string | null;
+  problems: string[];
+}
+
+export interface LoadsQuestion {
+  text: string;
+  at: LocalDateTime;
 }
 
 export interface LoadsStatus {
   geyser: GeyserStatus;
   ev: EvStatus;
+  hotplate: HotplateStatus;
+  water: LoadRow;
+  geyser_first: string | null;
+  question: LoadsQuestion | null;
+  ai: LoadsAiStatus;
+  sun_hours: SunHour[];
+  tank_question: LocalDateTime | null;
   water_running_since: LocalDateTime | null;
   spare_kwh: number | null;
   sunset_target_soc: number | null;
   projected_sunset_soc: number | null;
+  full_by: LocalDateTime | null;
   pv_ratio: number | null;
   plan: LoadSlot[];
+  grid_now: boolean;
+  grid_kwh: number | null;
+  geyser_required: string | null;
 }
 
 export interface ScooterReading {
@@ -284,6 +353,17 @@ export interface HourOutlook {
   radiation_w_m2: number | null;
 }
 
+export interface PvPoint {
+  at: LocalDateTime;
+  watts: number;
+}
+
+export interface MeasuredPv {
+  at: LocalDateTime;
+  watts: number;
+  held_back: boolean;
+}
+
 export interface WeatherSummary {
   next_day: DayOutlook | null;
   recent_avg_radiation_kwh_m2: number | null;
@@ -292,6 +372,9 @@ export interface WeatherSummary {
   recent_nights_min_temp_c: number | null;
   expected_pv_kwh_next_day: number | null;
   hours_until_sunset: HourOutlook[];
+  today_pv: PvPoint[];
+  today_measured: MeasuredPv[];
+  fetched_at: LocalDateTime | null;
 }
 
 export type ProjectionMethod = "pv_array" | "pv_headroom" | "charge_scaling" | "constant_charge" | "after_sunset";

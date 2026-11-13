@@ -3,6 +3,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::automation::history::DaySolar;
+use crate::automation::solar::{MeasuredPv, PvPoint};
 
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
 const MJ_PER_KWH: f64 = 3.6;
@@ -120,6 +121,17 @@ impl Forecast {
         self.hourly.iter().find(|h| h.at == hour_end).and_then(|h| h.radiation_w_m2)
     }
 
+    /// Radiation (W/m²) at `at`, read between the middles of the forecast hours.
+    pub fn radiation_at(&self, at: NaiveDateTime) -> Option<f64> {
+        let index = self.hourly.iter().position(|h| h.at - Duration::minutes(30) > at)?;
+        let after = &self.hourly[index];
+        let before = self.hourly.get(index.checked_sub(1)?)?;
+        let (t0, t1) = (before.at - Duration::minutes(30), after.at - Duration::minutes(30));
+        let (r0, r1) = (before.radiation_w_m2?, after.radiation_w_m2?);
+        let frac = (at - t0).num_seconds() as f64 / (t1 - t0).num_seconds() as f64;
+        Some(r0 + (r1 - r0) * frac)
+    }
+
     pub fn hours_between(&self, from: NaiveDateTime, to: NaiveDateTime) -> Vec<&HourWeather> {
         self.hourly.iter().filter(|h| h.at > from && h.at <= to).collect()
     }
@@ -159,6 +171,9 @@ pub struct DayOutlook {
 pub struct RecentDay {
     pub date: NaiveDate,
     pub radiation_kwh_m2: Option<f64>,
+    pub cloud_pct: Option<f64>,
+    pub rain_prob_pct: Option<f64>,
+    pub morning_low_soc: Option<f64>,
     pub max_soc: Option<f64>,
     pub full_at: Option<String>,
 }
@@ -179,6 +194,9 @@ pub struct WeatherSummary {
     pub recent_nights_min_temp_c: Option<f64>,
     pub expected_pv_kwh_next_day: Option<f64>,
     pub hours_until_sunset: Vec<HourOutlook>,
+    pub today_pv: Vec<PvPoint>,
+    pub today_measured: Vec<MeasuredPv>,
+    pub fetched_at: Option<NaiveDateTime>,
 }
 
 pub struct SummaryInput<'a> {
@@ -189,7 +207,10 @@ pub struct SummaryInput<'a> {
     pub night: NaiveDate,
     pub sunset: NaiveDateTime,
     pub pv_array_watts: f64,
+    pub pv_ratio: f64,
     pub solar_history: &'a [DaySolar],
+    pub today_pv: Vec<PvPoint>,
+    pub today_measured: Vec<MeasuredPv>,
 }
 
 pub fn summarize(forecast: &Forecast, input: SummaryInput<'_>) -> WeatherSummary {
@@ -211,6 +232,9 @@ pub fn summarize(forecast: &Forecast, input: SummaryInput<'_>) -> WeatherSummary
             RecentDay {
                 date: day.date,
                 radiation_kwh_m2: day.radiation_kwh_m2,
+                cloud_pct: forecast.daytime_cloud_avg(day.date),
+                rain_prob_pct: day.rain_prob_pct,
+                morning_low_soc: solar.and_then(|s| s.morning_low_soc),
                 max_soc: solar.and_then(|s| s.max_soc),
                 full_at: solar.and_then(|s| s.full_at).map(|t| t.format("%H:%M").to_string()),
             }
@@ -230,7 +254,7 @@ pub fn summarize(forecast: &Forecast, input: SummaryInput<'_>) -> WeatherSummary
         .as_ref()
         .and_then(|day| day.radiation_kwh_m2)
         .filter(|_| input.pv_array_watts > 0.0)
-        .map(|kwh_m2| kwh_m2 * input.pv_array_watts / 1000.0 * PERFORMANCE_RATIO);
+        .map(|kwh_m2| kwh_m2 * input.pv_array_watts / 1000.0 * input.pv_ratio);
 
     let hours_until_sunset = forecast
         .hours_between(input.now, input.sunset + Duration::hours(1))
@@ -250,6 +274,9 @@ pub fn summarize(forecast: &Forecast, input: SummaryInput<'_>) -> WeatherSummary
         recent_nights_min_temp_c,
         expected_pv_kwh_next_day,
         hours_until_sunset,
+        today_pv: input.today_pv,
+        today_measured: input.today_measured,
+        fetched_at: None,
     }
 }
 
@@ -321,6 +348,7 @@ mod tests {
             date: at(20, 0).date(),
             max_soc: Some(100.0),
             full_at: NaiveTime::from_hms_opt(13, 10, 0),
+            morning_low_soc: Some(30.0),
             samples: 40,
         }];
         let summary = summarize(
@@ -331,7 +359,10 @@ mod tests {
                 night: at(20, 0).date(),
                 sunset: at(21, 18),
                 pv_array_watts: 3000.0,
+                pv_ratio: PERFORMANCE_RATIO,
                 solar_history: &history,
+                today_pv: Vec::new(),
+                today_measured: Vec::new(),
             },
         );
         let next = summary.next_day.unwrap();
@@ -343,5 +374,7 @@ mod tests {
         assert!((summary.expected_pv_kwh_next_day.unwrap() - 4.5).abs() < 1e-9);
         assert_eq!(summary.tonight_min_temp_c, Some(24.0));
         assert_eq!(summary.recent_nights_min_temp_c, Some(22.5));
+        let between = forecast.radiation_at(at(21, 6)).unwrap();
+        assert!((between - 300.0).abs() < 1e-9, "{between}");
     }
 }

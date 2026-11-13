@@ -16,6 +16,8 @@ const LEGACY_DECISION_HEADER: &str = "timestamp,window,mode,reserve_soc,recheck_
 const NIGHT_HOURS: [u32; 15] = [17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7];
 const DAY_HOURS: [u32; 14] = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 const MIN_HOURS_FOR_A_NIGHT: usize = 3;
+const BASE_PERCENTILE: f64 = 0.25;
+const BASE_MIN_SAMPLES: usize = 6;
 const FULL_SOC: f64 = 95.0;
 const OUTAGE_GAP_MINUTES: i64 = 60;
 /// A sample counts as "on battery" when the inverter is on SBG and the BMS
@@ -391,6 +393,29 @@ pub fn day_profile(samples: &[Sample], today: NaiveDate, days: i64) -> Vec<HourL
         .collect()
 }
 
+/// The house's own load by hour: a low percentile of the readings, so the
+/// geyser, motor, hotplate and charger, which run only part of the time,
+/// don't count as the house.
+pub fn day_base_profile(samples: &[Sample], today: NaiveDate, days: i64) -> Vec<HourLoad> {
+    let since = today - Duration::days(days);
+    DAY_HOURS
+        .iter()
+        .filter_map(|hour| {
+            let mut values: Vec<f64> = samples
+                .iter()
+                .filter(|s| s.at.date() >= since && s.at.date() < today && s.at.hour() == *hour)
+                .filter_map(|s| s.load_w)
+                .collect();
+            if values.len() < BASE_MIN_SAMPLES {
+                return None;
+            }
+            values.sort_by(f64::total_cmp);
+            let load_w = values[((values.len() - 1) as f64 * BASE_PERCENTILE).round() as usize];
+            Some(HourLoad { hour: *hour, load_w, nights: days as u32 })
+        })
+        .collect()
+}
+
 pub fn soc_points(samples: &[Sample], since: NaiveDateTime) -> Vec<(NaiveDateTime, f64)> {
     samples
         .iter()
@@ -479,6 +504,8 @@ pub struct DaySolar {
     pub date: NaiveDate,
     pub max_soc: Option<f64>,
     pub full_at: Option<NaiveTime>,
+    /// The lowest SOC that morning before the sun filled the battery.
+    pub morning_low_soc: Option<f64>,
     pub samples: usize,
 }
 
@@ -496,7 +523,12 @@ pub fn daily_solar(samples: &[Sample], today: NaiveDate, days: i64) -> Vec<DaySo
             }
             let max_soc = daytime.iter().filter_map(|s| s.soc).reduce(f64::max);
             let full_at = daytime.iter().find(|s| s.soc.is_some_and(|soc| soc >= FULL_SOC)).map(|s| s.at.time());
-            Some(DaySolar { date, max_soc, full_at, samples: daytime.len() })
+            let morning_low_soc = samples
+                .iter()
+                .filter(|s| s.at.date() == date && s.at.hour() < 10 && full_at.is_none_or(|full| s.at.time() <= full))
+                .filter_map(|s| s.soc)
+                .reduce(f64::min);
+            Some(DaySolar { date, max_soc, full_at, morning_low_soc, samples: daytime.len() })
         })
         .collect()
 }

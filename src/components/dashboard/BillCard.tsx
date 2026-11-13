@@ -1,5 +1,7 @@
 import { TriangleAlert } from "lucide-react";
 import { useState, type FormEvent } from "react";
+import { Bar, BarChart, CartesianGrid, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { CHART_FONT, ChartTooltipBox, VIZ } from "@/components/automation/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useEnergyUnits } from "@/hooks/useEnergyUnits";
@@ -41,7 +43,11 @@ export function BillCard() {
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-5 lg:divide-x">
         <div className="px-4 sm:px-5 py-4 lg:col-span-2">
-          {estimate ? <ExpectedBill estimate={estimate} /> : <p className="text-sm text-muted-foreground">The expected bill shows up once this bill has a few hours of data.</p>}
+          {estimate ? (
+            <ExpectedBill estimate={estimate} />
+          ) : (
+            <p className="text-sm text-muted-foreground">The expected bill shows up once this bill has a few hours of data.</p>
+          )}
         </div>
         <div className="border-t px-4 sm:px-5 py-4 lg:col-span-3 lg:border-t-0">
           <SavingsTable
@@ -77,7 +83,9 @@ function ExpectedBill({ estimate }: { estimate: BillEstimate }) {
       </p>
       <p className="mt-2 flex items-baseline gap-2 tabular-nums">
         <span className="text-2xl font-semibold">~{rupees(estimate.total)}</span>
-        <span className="text-xs text-muted-foreground">{estimate.basis === "plan" ? "if you follow the switch plan" : "at this pace"}</span>
+        <span className="text-xs text-muted-foreground">
+          {estimate.basis === "plan" ? "if you follow the switch plan" : "at this pace"}
+        </span>
       </p>
       <table className="mt-3 w-full text-xs tabular-nums">
         <thead className="text-muted-foreground">
@@ -143,9 +151,7 @@ function SlabWarning({ meter, bill }: { meter: number; bill: MeterBill }) {
     return (
       <li className="flex items-start gap-1.5">
         <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden />
-        <span>
-          Meter {meter} is over 200 units: it loses protected rates for six months.
-        </span>
+        <span>Meter {meter} is over 200 units: it loses protected rates for six months.</span>
       </li>
     );
   }
@@ -153,9 +159,7 @@ function SlabWarning({ meter, bill }: { meter: number; bill: MeterBill }) {
     return (
       <li className="flex items-start gap-1.5">
         <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
-        <span>
-          Meter {meter} goes over 100 units: fixed charges rise from Rs 400 to Rs 600 and units above 100 cost 13.01.
-        </span>
+        <span>Meter {meter} goes over 100 units: fixed charges rise from Rs 400 to Rs 600 and units above 100 cost 13.01.</span>
       </li>
     );
   }
@@ -191,74 +195,79 @@ function SavingsTable({
       {rows.length === 0 ? (
         <p className="mt-2 text-sm text-muted-foreground">Savings show up once a bill period has data.</p>
       ) : (
-        <table className="mt-2 w-full text-xs tabular-nums">
-          <thead className="text-muted-foreground">
-            <tr>
-              <th scope="col" className="pb-1 text-left font-normal">
-                Bill
-              </th>
-              <th scope="col" className="pb-1 text-right font-normal">
-                Units
-              </th>
-              <th scope="col" className="pb-1 text-right font-normal">
-                Without solar
-              </th>
-              <th scope="col" className="pb-1 text-right font-normal">
-                Bill
-              </th>
-              <th scope="col" className="pb-1 text-right font-normal">
-                Without solar
-              </th>
-              <th scope="col" className="pb-1 text-right font-normal">
-                Saved
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {newestFirst.map((row) =>
-              editing === row.start ? (
-                <tr key={row.start}>
-                  <td colSpan={6} className="py-1">
-                    <BilledUnitsForm
-                      label={monthOf(row.end)}
-                      pending={pending}
-                      onCancel={() => setEditing(null)}
-                      onSave={async (meter1, meter2) => {
-                        await onSave(row.start, meter1, meter2);
-                        setEditing(null);
-                      }}
-                    />
-                  </td>
-                </tr>
-              ) : (
-                <tr key={row.start} className="align-baseline">
-                  <th scope="row" className="py-1 text-left font-normal">
-                    <span className="text-foreground">{monthOf(row.end)}</span>
-                    <span className="ml-1.5 inline-flex items-center gap-1">
-                      {row.partial ? (
-                        <Badge variant="secondary">so far</Badge>
-                      ) : row.billed ? null : (
-                        <button type="button" onClick={() => setEditing(row.start)} className={cn(TEXT_BUTTON, "text-micro")}>
-                          enter bill
-                        </button>
-                      )}
-                      {row.coverage < 0.95 ? (
-                        <span className="text-micro text-muted-foreground" title="Share of the period the inverter's log covers">
-                          {fmtNumber(row.coverage * 100, 0)}% logged
-                        </span>
-                      ) : null}
-                    </span>
+        <>
+          <SavingsBars rows={rows} />
+          <div className="overflow-x-auto">
+            <table className="mt-2 w-full min-w-[30rem] text-xs tabular-nums">
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th scope="col" className="pb-1 text-left font-normal">
+                    Bill
                   </th>
-                  <td className="py-1 text-right">{fmtNumber(row.units, 0)}</td>
-                  <td className="py-1 text-right text-muted-foreground">{fmtNumber(row.units_without, 0)}</td>
-                  <td className="py-1 text-right">{rupees(row.bill)}</td>
-                  <td className="py-1 text-right text-muted-foreground">{rupees(row.bill_without)}</td>
-                  <td className="py-1 text-right font-semibold">{rupees(row.saved)}</td>
+                  <th scope="col" className="pb-1 text-right font-normal">
+                    Units
+                  </th>
+                  <th scope="col" className="pb-1 text-right font-normal">
+                    Without solar
+                  </th>
+                  <th scope="col" className="pb-1 text-right font-normal">
+                    Bill
+                  </th>
+                  <th scope="col" className="pb-1 text-right font-normal">
+                    Without solar
+                  </th>
+                  <th scope="col" className="pb-1 text-right font-normal">
+                    Saved
+                  </th>
                 </tr>
-              ),
-            )}
-          </tbody>
-        </table>
+              </thead>
+              <tbody>
+                {newestFirst.map((row) =>
+                  editing === row.start ? (
+                    <tr key={row.start}>
+                      <td colSpan={6} className="py-1">
+                        <BilledUnitsForm
+                          label={monthOf(row.end)}
+                          pending={pending}
+                          onCancel={() => setEditing(null)}
+                          onSave={async (meter1, meter2) => {
+                            await onSave(row.start, meter1, meter2);
+                            setEditing(null);
+                          }}
+                        />
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr key={row.start} className="align-baseline">
+                      <th scope="row" className="py-1 text-left font-normal">
+                        <span className="text-foreground">{monthOf(row.end)}</span>
+                        <span className="ml-1.5 inline-flex items-center gap-1">
+                          {row.partial ? (
+                            <Badge variant="secondary">so far</Badge>
+                          ) : row.billed ? null : (
+                            <button type="button" onClick={() => setEditing(row.start)} className={cn(TEXT_BUTTON, "text-micro")}>
+                              enter bill
+                            </button>
+                          )}
+                          {row.coverage < 0.95 ? (
+                            <span className="text-micro text-muted-foreground" title="Share of the period the inverter's log covers">
+                              {fmtNumber(row.coverage * 100, 0)}% logged
+                            </span>
+                          ) : null}
+                        </span>
+                      </th>
+                      <td className="py-1 text-right">{fmtNumber(row.units, 0)}</td>
+                      <td className="py-1 text-right text-muted-foreground">{fmtNumber(row.units_without, 0)}</td>
+                      <td className="py-1 text-right">{rupees(row.bill)}</td>
+                      <td className="py-1 text-right text-muted-foreground">{rupees(row.bill_without)}</td>
+                      <td className="py-1 text-right font-semibold">{rupees(row.saved)}</td>
+                    </tr>
+                  ),
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
       {error ? (
         <p role="alert" className="mt-1 text-xs text-destructive">
@@ -266,9 +275,107 @@ function SavingsTable({
         </p>
       ) : null}
       <p className="mt-2 text-micro leading-snug text-muted-foreground">
-        Without solar the house would take its whole load from the grid, split between the meters as it was, so a meter can cross 100 or
-        200 units. Bills you haven't entered use the app's count. Today's rates are used for every month.
+        Without solar the house would take its whole load from the grid, split between the meters as it was, so a meter can cross 100 or 200
+        units. Bills you haven't entered use the app's count. Today's rates are used for every month.
       </p>
+    </div>
+  );
+}
+
+interface SavingsBar {
+  key: string;
+  label: string;
+  row: PeriodSavings;
+  bill: number;
+  without: number;
+}
+
+function SavingsLegend({ fill, label }: { fill: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="size-2 rounded-xs" style={{ background: fill }} aria-hidden />
+      {label}
+    </span>
+  );
+}
+
+/** Each bill next to what it would have been without solar; the saving sits on top. */
+function SavingsBars({ rows }: { rows: PeriodSavings[] }) {
+  const bars: SavingsBar[] = rows.map((row) => ({
+    key: row.start,
+    label: `${monthOf(row.end).split(" ")[0]}${row.partial ? "*" : ""}`,
+    row,
+    bill: row.bill,
+    without: row.bill_without,
+  }));
+  const peak = Math.max(1000, ...bars.map((bar) => bar.without));
+  const step = peak <= 4000 ? 1000 : peak <= 10000 ? 2000 : 5000;
+  const top = Math.ceil(peak / step) * step;
+  const ticks = Array.from({ length: Math.round(top / step) + 1 }, (_, index) => index * step);
+  const partial = rows.some((row) => row.partial);
+
+  return (
+    <div className="mt-3">
+      <div
+        className="h-44"
+        role="img"
+        aria-label={`Bills compared with what they would have been without solar, for ${rows.length} bill periods`}
+      >
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={bars} margin={{ top: 18, right: 0, bottom: 0, left: 0 }} barCategoryGap="22%" barGap={2}>
+            <CartesianGrid vertical={false} stroke={VIZ.grid} />
+            <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fontSize: CHART_FONT, fill: VIZ.ink }} />
+            <YAxis
+              orientation="right"
+              domain={[0, top]}
+              ticks={ticks}
+              tickFormatter={(value: number) => `${value / 1000}k`}
+              tick={{ fontSize: CHART_FONT, fill: VIZ.ink }}
+              tickLine={false}
+              axisLine={false}
+              width={28}
+            />
+            <Tooltip
+              cursor={{ fill: VIZ.grid }}
+              content={({ active, payload }) => {
+                const bar = payload?.[0]?.payload as SavingsBar | undefined;
+                if (!active || !bar) return null;
+                return (
+                  <ChartTooltipBox>
+                    <p className="font-medium">
+                      {monthOf(bar.row.end)}
+                      {bar.row.partial ? " · so far" : ""}
+                    </p>
+                    <p className="text-muted-foreground">
+                      Bill <span className="text-foreground">{rupees(bar.bill)}</span>
+                    </p>
+                    <p className="text-muted-foreground">
+                      Without solar <span className="text-foreground">{rupees(bar.without)}</span>
+                    </p>
+                    <p className="text-muted-foreground">
+                      Saved <span className="font-semibold text-foreground">{rupees(bar.row.saved)}</span>
+                    </p>
+                  </ChartTooltipBox>
+                );
+              }}
+            />
+            <Bar dataKey="bill" fill={VIZ.accent} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+            <Bar dataKey="without" fill={VIZ.context} radius={[4, 4, 0, 0]} isAnimationActive={false}>
+              <LabelList
+                dataKey={(bar: SavingsBar) => bar.row.saved}
+                position="top"
+                formatter={(value: unknown) => `−${rupees(Number(value))}`}
+                style={{ fontSize: CHART_FONT, fill: "var(--foreground)" }}
+              />
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-micro text-muted-foreground">
+        <SavingsLegend fill={VIZ.accent} label="Your bill" />
+        <SavingsLegend fill={VIZ.context} label="Without solar (saving on top)" />
+        {partial ? <span>* this bill so far</span> : null}
+      </div>
     </div>
   );
 }
@@ -358,7 +465,10 @@ function RatesRow({
     { key: "adjustment", label: "Tariff adjustment", hint: "per unit, negative is a discount" },
   ] as const;
   return (
-    <form onSubmit={submit} className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t px-4 sm:px-5 py-3 text-xs text-muted-foreground">
+    <form
+      onSubmit={submit}
+      className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t px-4 sm:px-5 py-3 text-xs text-muted-foreground"
+    >
       <span className="font-semibold text-foreground">Rates from your latest bill</span>
       {fields.map((field) => (
         <label key={field.key} className="inline-flex items-center gap-1.5" title={field.hint}>

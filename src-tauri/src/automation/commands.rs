@@ -6,6 +6,7 @@ use crate::geyser::{Button, GeyserRemote, RemoteStatus};
 use crate::scooter::{ScooterReading, ScooterState};
 use super::history::DecisionRow;
 use super::insights::AutomationInsights;
+use super::loads::{EditState, LoadEdit, LoadKind, LoadPhase, LoadsAnswer};
 use super::{AutomationState, AutomationStatus};
 use crate::notifications::Notifier;
 
@@ -31,6 +32,13 @@ pub async fn update_automation_config(
 #[tauri::command]
 pub async fn force_automation_check(state: State<'_, AutomationState>) -> Result<(), String> {
     state.force_check.store(true, std::sync::atomic::Ordering::SeqCst);
+    state.wake.notify_one();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn refresh_forecast(state: State<'_, AutomationState>) -> Result<(), String> {
+    state.refresh_forecast.store(true, std::sync::atomic::Ordering::SeqCst);
     state.wake.notify_one();
     Ok(())
 }
@@ -67,9 +75,13 @@ pub async fn mark_water_done(app: AppHandle, state: State<'_, AutomationState>) 
         .set_status(|status| {
             status.water.phase = super::water::WaterPhase::Done;
             status.water.note = None;
+            status.loads.water.phase = LoadPhase::Done;
+            status.loads.water.note = Some("Filled · updating the plan…".into());
+            status.loads.water_running_since = None;
+            status.loads.tank_question = None;
         })
         .await;
-    state.wake.notify_one();
+    state.loads_touched();
     Ok(state.status().await)
 }
 
@@ -84,7 +96,7 @@ pub async fn mark_geyser_done(app: AppHandle, state: State<'_, AutomationState>)
             status.loads.geyser.row.note = Some("Marked done for today.".into());
         })
         .await;
-    state.wake.notify_one();
+    state.loads_touched();
     Ok(state.status().await)
 }
 
@@ -99,7 +111,104 @@ pub async fn skip_scooter_today(app: AppHandle, state: State<'_, AutomationState
             status.loads.ev.row.note = Some("Skipped for today.".into());
         })
         .await;
-    state.wake.notify_one();
+    state.loads_touched();
+    Ok(state.status().await)
+}
+
+#[tauri::command]
+pub async fn answer_loads_question(state: State<'_, AutomationState>, yes: bool) -> Result<AutomationStatus, String> {
+    *state.loads_answer.lock().await = Some(if yes { LoadsAnswer::Yes } else { LoadsAnswer::No });
+    state.set_status(|status| status.loads.question = None).await;
+    state.loads_touched();
+    Ok(state.status().await)
+}
+
+/// Saves or clears one of the remembered days, keeping the app's copy in step.
+async fn set_day(app: &AppHandle, cell: &tokio::sync::Mutex<Option<chrono::NaiveDate>>, key: &str, date: Option<chrono::NaiveDate>) -> Result<(), String> {
+    crate::storage::save_day(app, key, date)?;
+    *cell.lock().await = date;
+    Ok(())
+}
+
+async fn clear_if_today(app: &AppHandle, cell: &tokio::sync::Mutex<Option<chrono::NaiveDate>>, key: &str, today: chrono::NaiveDate) -> Result<(), String> {
+    if *cell.lock().await == Some(today) {
+        set_day(app, cell, key, None).await?;
+    }
+    Ok(())
+}
+
+/// The family correcting what the app believes about a load.
+#[tauri::command]
+pub async fn edit_load(app: AppHandle, state: State<'_, AutomationState>, edit: LoadEdit) -> Result<AutomationStatus, String> {
+    let today = chrono::Local::now().date_naive();
+    match (edit.load, edit.state) {
+        (LoadKind::Water, EditState::Done) => set_day(&app, &state.water_done_on, "water_done_on", Some(today)).await?,
+        (LoadKind::Water, _) => clear_if_today(&app, &state.water_done_on, "water_done_on", today).await?,
+        (LoadKind::Geyser, EditState::Done) => set_day(&app, &state.geyser_done_on, "geyser_done_on", Some(today)).await?,
+        (LoadKind::Geyser, _) => clear_if_today(&app, &state.geyser_done_on, "geyser_done_on", today).await?,
+        (LoadKind::Hotplate, EditState::Off) => clear_if_today(&app, &state.hotplate_on, "hotplate_on", today).await?,
+        (LoadKind::Hotplate, _) => {
+            set_day(&app, &state.hotplate_on, "hotplate_on", Some(today)).await?;
+            clear_if_today(&app, &state.hotplate_skip_on, "hotplate_skip_on", today).await?;
+        }
+        (LoadKind::Ev, EditState::On) => clear_if_today(&app, &state.ev_skip_on, "ev_skip_on", today).await?,
+        (LoadKind::Ev, _) => {}
+    }
+    let (phase, note) = match edit.state {
+        EditState::On => (LoadPhase::Running, "On · updating the plan…"),
+        EditState::Off => (LoadPhase::Waiting, "Off · updating the plan…"),
+        EditState::Done => (LoadPhase::Done, "Done · updating the plan…"),
+    };
+    let kind = edit.load;
+    state
+        .set_status(|status| {
+            let loads = &mut status.loads;
+            let row = match kind {
+                LoadKind::Water => &mut loads.water,
+                LoadKind::Geyser => &mut loads.geyser.row,
+                LoadKind::Hotplate => &mut loads.hotplate.row,
+                LoadKind::Ev => &mut loads.ev.row,
+            };
+            row.phase = phase;
+            row.note = Some(note.into());
+            if kind == LoadKind::Water {
+                loads.tank_question = None;
+                if phase == LoadPhase::Done {
+                    status.water.phase = super::water::WaterPhase::Done;
+                }
+            }
+        })
+        .await;
+    state.loads_edits.lock().await.push(edit);
+    state.loads_touched();
+    Ok(state.status().await)
+}
+
+#[tauri::command]
+pub async fn hotplate_done(state: State<'_, AutomationState>) -> Result<AutomationStatus, String> {
+    *state.loads_answer.lock().await = Some(LoadsAnswer::HotplateDone);
+    state
+        .set_status(|status| {
+            status.loads.hotplate.row.phase = LoadPhase::Done;
+            status.loads.hotplate.row.note = Some("Done cooking · updating the plan…".into());
+        })
+        .await;
+    state.loads_touched();
+    Ok(state.status().await)
+}
+
+#[tauri::command]
+pub async fn skip_hotplate_today(app: AppHandle, state: State<'_, AutomationState>) -> Result<AutomationStatus, String> {
+    let today = chrono::Local::now().date_naive();
+    crate::storage::save_hotplate_skip_on(&app, today)?;
+    *state.hotplate_skip_on.lock().await = Some(today);
+    state
+        .set_status(|status| {
+            status.loads.hotplate.row.phase = super::loads::LoadPhase::Skipped;
+            status.loads.hotplate.row.note = Some("Not cooking on the hotplate today.".into());
+        })
+        .await;
+    state.loads_touched();
     Ok(state.status().await)
 }
 
@@ -114,7 +223,7 @@ pub async fn read_scooter_now(
     let config = state.config().await;
     let mac = Some(config.ev_ble_mac.as_str()).filter(|mac| !mac.is_empty());
     let reading = scooter.read(&config.ev_ble_name, mac, power_cycle).await;
-    state.wake.notify_one();
+    state.loads_touched();
     reading
 }
 

@@ -6,7 +6,6 @@ use crate::battery::types::BatterySnapshot;
 use crate::inverter::types::{output_mode_name, resolve_grid, GridBasis, GridInputs, GridStatus, InverterSnapshot};
 
 const INVERTER_EFFICIENCY: f64 = 0.9;
-const PERFORMANCE_RATIO: f64 = 0.75;
 const MIN_REFERENCE_RADIATION: f64 = 50.0;
 const MAX_RADIATION_RATIO: f64 = 2.5;
 pub const FULL_SOC: f64 = 99.5;
@@ -271,15 +270,18 @@ pub struct DayProjectionInput<'a> {
     pub max_charge_a: Option<f64>,
     pub pv_now_w: Option<f64>,
     pub pv_array_watts: f64,
+    pub pv_ratio: f64,
     pub current_load_w: Option<f64>,
     pub radiation_during: &'a dyn Fn(NaiveDateTime) -> Option<f64>,
+    /// Expected panel watts, already pulled towards what the panels make now.
+    pub pv_during: Option<&'a dyn Fn(NaiveDateTime) -> Option<f64>>,
     pub typical_load_for_hour: &'a dyn Fn(u32) -> Option<f64>,
 }
 
 /// Where the battery ends up by sunset if charging follows the forecast sun.
-/// It projects the charge the battery *could* take — forecast PV minus the
-/// typical house load, capped at the inverter's max charge current — so a
-/// temporary big load (an EV charging) doesn't read as "won't fill".
+/// It projects the charge the battery *could* take — forecast PV minus what
+/// the house uses now for the coming hour, then its typical load, capped at
+/// the inverter's max charge current.
 pub fn project_day(input: DayProjectionInput<'_>) -> DayProjection {
     let hours_of_sun_left = ((input.sunset - input.now).num_seconds() as f64 / 3600.0).max(0.0);
     let ah_to_full = ((100.0 - input.soc).max(0.0) / 100.0) * input.rated_ah;
@@ -307,7 +309,7 @@ pub fn project_day(input: DayProjectionInput<'_>) -> DayProjection {
         _ => ProjectionMethod::ConstantCharge,
     };
     let reference = radiation_now.unwrap_or(0.0).max(MIN_REFERENCE_RADIATION);
-    let house_load = |hour: u32| (input.typical_load_for_hour)(hour).or(input.current_load_w).unwrap_or(0.0);
+    let usual_load = |hour: u32| (input.typical_load_for_hour)(hour).or(input.current_load_w).unwrap_or(0.0);
 
     let mut level = input.soc;
     let mut full_at = base.full_at;
@@ -316,9 +318,15 @@ pub fn project_day(input: DayProjectionInput<'_>) -> DayProjection {
         let step_end = next_hour(at).min(input.sunset);
         let hours = (step_end - at).num_seconds() as f64 / 3600.0;
         let radiation = (input.radiation_during)(at);
+        let soon = at < input.now + Duration::hours(1);
+        let house_load = |hour: u32| if soon { input.current_load_w.unwrap_or_else(|| usual_load(hour)) } else { usual_load(hour) };
         let amps = match (method, radiation, voltage) {
             (ProjectionMethod::PvArray, Some(rad), Some(v)) => {
-                let pv = rad * input.pv_array_watts / 1000.0 * PERFORMANCE_RATIO;
+                let middle = at + (step_end - at) / 2;
+                let pv = input
+                    .pv_during
+                    .and_then(|pv_during| pv_during(middle))
+                    .unwrap_or(rad * input.pv_array_watts / 1000.0 * input.pv_ratio);
                 (pv - house_load(at.hour())).max(0.0) / v
             }
             (ProjectionMethod::PvHeadroom, Some(rad), Some(v)) => {
@@ -482,8 +490,10 @@ mod tests {
             max_charge_a: Some(45.0),
             pv_now_w: None,
             pv_array_watts: 0.0,
+            pv_ratio: 0.75,
             current_load_w: Some(400.0),
             radiation_during: radiation,
+            pv_during: None,
             typical_load_for_hour: typical,
         }
     }
@@ -545,14 +555,16 @@ mod tests {
     }
 
     #[test]
-    fn array_size_projection_subtracts_typical_load() {
+    fn array_size_projection_takes_the_load_on_now_for_an_hour_then_the_usual_load() {
         let sunny = |_: NaiveDateTime| Some(800.0);
         let typical = |_: u32| Some(600.0);
-        let mut input = day_input(at(17, 0), 50.0, 0.0, &sunny, &typical);
+        let mut input = day_input(at(16, 0), 20.0, 0.0, &sunny, &typical);
         input.pv_array_watts = 3000.0;
+        input.current_load_w = Some(1400.0);
         let projection = project_day(input);
         assert_eq!(projection.method, ProjectionMethod::PvArray);
-        let amps = (800.0 * 3.0 * PERFORMANCE_RATIO - 600.0) / 51.2;
-        assert!((projection.soc_at_sunset - (50.0 + amps)).abs() < 1e-9);
+        let now_amps = (800.0 * 3.0 * 0.75 - 1400.0) / 51.2;
+        let later_amps = (800.0 * 3.0 * 0.75 - 600.0) / 51.2;
+        assert!((projection.soc_at_sunset - (20.0 + now_amps + later_amps)).abs() < 1e-9);
     }
 }

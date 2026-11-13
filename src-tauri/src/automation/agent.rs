@@ -46,15 +46,15 @@ fn classify_failure(stderr: &str) -> &'static str {
     let text = stderr.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
     if has(&["unavailable", "overloaded", "high demand", "\"code\":503", "status: 503", "timeouterror", "operation was aborted"]) {
-        "Gemini is busy or down"
+        "the AI models are busy or down"
     } else if has(&["econnreset", "enotfound", "etimedout", "eai_again", "econnrefused", "fetch failed", "network", "socket"]) {
         "no internet connection"
     } else if has(&["api_key_invalid", "api key not valid", "permission_denied", "401", "403", "api_key is not set", "api_key are not set"]) {
-        "Gemini rejected the API key"
+        "an AI provider rejected its API key"
     } else if has(&["429", "resource_exhausted", "quota", "rate limit"]) {
-        "Gemini quota or rate limit reached"
+        "the AI quota or rate limit was reached"
     } else if has(&["\"code\":500", "status: 500", "internal error"]) {
-        "Gemini is busy or down"
+        "the AI models are busy or down"
     } else {
         "the AI script failed — see the log"
     }
@@ -122,14 +122,34 @@ pub struct SocRow {
 pub struct OutageRow {
     pub when: String,
     pub minutes: f64,
+    /// Hours of it between midnight and the sun taking over, when the
+    /// battery is usually down at its reserve.
+    pub before_sun_hours: f64,
+    /// The reserve that would have carried those hours at the sleeping load.
+    pub reserve_to_cover: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RecentDayRow {
     pub date: String,
     pub radiation_kwh_m2: Option<f64>,
+    pub cloud_pct: Option<f64>,
+    pub rain_prob_pct: Option<f64>,
+    pub morning_low_soc: Option<f64>,
     pub max_soc: Option<f64>,
     pub full_at: Option<String>,
+}
+
+/// What the recent days say about the sun refilling the battery.
+#[derive(Debug, Clone, Serialize)]
+pub struct RefillSummary {
+    pub days: usize,
+    pub full_days: usize,
+    pub latest_full_at: Option<String>,
+    /// The lowest morning SOC on a day that still got full.
+    pub lowest_start_filled: Option<f64>,
+    pub darkest_full: Option<RecentDayRow>,
+    pub wettest_full: Option<RecentDayRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,6 +168,7 @@ pub struct WeatherBrief {
     pub next_day: Option<NextDayRow>,
     pub recent_avg_radiation_kwh_m2: Option<f64>,
     pub recent_days: Vec<RecentDayRow>,
+    pub refill: Option<RefillSummary>,
     pub tonight_min_temp_c: Option<f64>,
     pub recent_nights_min_temp_c: Option<f64>,
     pub expected_pv_kwh_next_day: Option<f64>,
@@ -287,12 +308,6 @@ pub struct DayDecision {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct EvHourRow {
-    pub time: String,
-    pub spare_w: f64,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct EvDayRow {
     pub date: String,
     pub relative: String,
@@ -301,38 +316,109 @@ pub struct EvDayRow {
     pub cloud_pct: Option<f64>,
     pub rain_prob_pct: Option<f64>,
     pub expected_pv_kwh: Option<f64>,
-    /// What that day's sun leaves after the house, the battery's refill, the
-    /// geyser and the water tank.
+    pub cooking_day: bool,
+    /// What that day's sun leaves for the scooter and the geyser after the
+    /// house, the battery's refill, the water tank and, on a cooking day,
+    /// the hotplate.
     pub expected_spare_kwh: Option<f64>,
 }
 
-/// Everything is pre-computed here so the model reasons instead of doing
-/// arithmetic.
 #[derive(Debug, Clone, Serialize)]
-pub struct EvInput {
+pub struct LoadsReading {
+    pub time: String,
+    pub load_w: Option<f64>,
+    pub pv_w: Option<f64>,
+    pub soc: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadsHour {
+    pub time: String,
+    pub sun_w: f64,
+    pub house_w: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadsBelief {
+    pub load: String,
+    pub watts: f64,
+    pub since: String,
+}
+
+/// The facts behind a solar-loads decision, worked out so the model reasons
+/// instead of doing arithmetic. Times are 24-hour "HH:MM" today.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadsAiInput {
     pub now: String,
+    pub time: String,
     pub sunset: String,
-    pub hours_of_sun_left: f64,
     pub soc: f64,
-    pub soc_basis: String,
     pub battery_kwh: f64,
-    pub charger_w: f64,
-    pub hours_to_full: f64,
-    pub daily_use_pct: f64,
-    pub days_of_riding_left: f64,
-    pub charging_now: bool,
-    pub need_kwh: f64,
-    /// Spare solar left today once the water tank and geyser have theirs and
-    /// the battery still reaches tonight's need.
-    pub spare_kwh_today: f64,
-    pub today_hours: Vec<EvHourRow>,
-    pub other_loads_today: String,
+    /// What the battery can lend in the day before it reaches the floor.
+    pub battery_lend_kwh: f64,
+    pub battery_w: Option<f64>,
+    pub day_floor_soc: f64,
+    pub full_by_sun_alone: Option<String>,
+    pub sunset_soc_sun_alone: f64,
+    pub load_w: Option<f64>,
+    pub pv_w: Option<f64>,
+    pub pv_held_back: bool,
+    /// The last half hour's panels as a share of the forecast; the hours
+    /// below already carry it.
+    pub sky_vs_forecast_pct: Option<f64>,
+    pub house_usual_w: f64,
+    pub recent: Vec<LoadsReading>,
+    pub believed: Vec<LoadsBelief>,
+    pub hours: Vec<LoadsHour>,
+    pub water: String,
+    pub geyser: String,
+    pub hotplate: String,
+    pub scooter: String,
+    pub priority: String,
     pub next_days: Vec<EvDayRow>,
+    pub answers: Vec<String>,
+    pub previous: Option<String>,
+    pub problems: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct EvPlan {
-    pub charge_today: String,
+pub struct LoadsRunning {
+    pub load: String,
+    pub watts: f64,
+    #[serde(default)]
+    pub since: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoadsRun {
+    pub load: String,
+    pub start: String,
+    pub end: String,
+    pub watts: f64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LoadsNotes {
+    #[serde(default)]
+    pub water: String,
+    #[serde(default)]
+    pub geyser: String,
+    #[serde(default)]
+    pub hotplate: String,
+    #[serde(default)]
+    pub scooter: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoadsDecision {
+    pub running: Vec<LoadsRunning>,
+    pub sure: bool,
+    #[serde(default)]
+    pub question: String,
+    pub plan: Vec<LoadsRun>,
+    pub scooter_first: bool,
+    #[serde(default)]
+    pub notes: LoadsNotes,
     pub recheck_minutes: f64,
     pub reason: String,
     #[serde(default)]
@@ -343,7 +429,7 @@ pub trait AgentRunner: Send + Sync {
     fn run_sun(&self, input: SunInput) -> BoxFuture<'_, Result<SunInfo, AgentError>>;
     fn run_night(&self, input: NightInput) -> BoxFuture<'_, Result<NightPlan, AgentError>>;
     fn run_day(&self, input: DayInput) -> BoxFuture<'_, Result<DayDecision, AgentError>>;
-    fn run_ev(&self, input: EvInput) -> BoxFuture<'_, Result<EvPlan, AgentError>>;
+    fn run_loads(&self, input: LoadsAiInput) -> BoxFuture<'_, Result<LoadsDecision, AgentError>>;
 }
 
 pub struct NodeAgent;
@@ -375,8 +461,8 @@ impl AgentRunner for NodeAgent {
         Box::pin(async move { run_script("day.js", &input, &model_keys()?).await })
     }
 
-    fn run_ev(&self, input: EvInput) -> BoxFuture<'_, Result<EvPlan, AgentError>> {
-        Box::pin(async move { run_script("ev.js", &input, &model_keys()?).await })
+    fn run_loads(&self, input: LoadsAiInput) -> BoxFuture<'_, Result<LoadsDecision, AgentError>> {
+        Box::pin(async move { run_script("loads.js", &input, &model_keys()?).await })
     }
 }
 
@@ -466,6 +552,9 @@ async fn run_once(script: &str, payload: &[u8], keys: &[(&str, String)]) -> Resu
         if !stderr.trim().is_empty() {
             tracing::debug!("{script} stderr: {stderr}");
         }
+        for line in stderr.lines().filter(|line| line.contains(" failed after ") || line.starts_with("Got a response from ")) {
+            tracing::info!("{script}: {}", line.chars().take(300).collect::<String>());
+        }
         if !output.status.success() {
             return Err(AgentError::ScriptFailed(classify_failure(&stderr).into()));
         }
@@ -485,9 +574,9 @@ mod tests {
     fn failures_are_named_by_their_cause() {
         let network = "TypeError: fetch failed\n  [cause]: Error: Client network socket disconnected before secure TLS connection was established {\n    code: 'ECONNRESET'";
         assert_eq!(classify_failure(network), "no internet connection");
-        assert_eq!(classify_failure("ApiError: {\"error\":{\"code\":400,\"message\":\"API key not valid\"}}"), "Gemini rejected the API key");
-        assert_eq!(classify_failure("got status: 429 RESOURCE_EXHAUSTED"), "Gemini quota or rate limit reached");
-        assert_eq!(classify_failure("got status: 503 UNAVAILABLE. The model is overloaded"), "Gemini is busy or down");
+        assert_eq!(classify_failure("ApiError: {\"error\":{\"code\":400,\"message\":\"API key not valid\"}}"), "an AI provider rejected its API key");
+        assert_eq!(classify_failure("got status: 429 RESOURCE_EXHAUSTED"), "the AI quota or rate limit was reached");
+        assert_eq!(classify_failure("got status: 503 UNAVAILABLE. The model is overloaded"), "the AI models are busy or down");
         assert_eq!(classify_failure("SyntaxError: Unexpected token"), "the AI script failed — see the log");
     }
 
@@ -495,11 +584,11 @@ mod tests {
     fn mixed_model_failures_report_the_overload() {
         let mixed = "gemini-3.5-flash-lite failed after 624ms: 503 {\"error\":{\"code\":503,\"status\":\"UNAVAILABLE\"}}\n\
                      gemini-3.1-flash-lite failed after 900ms: TypeError fetch failed ECONNRESET at node:internal/process/task_queues";
-        assert_eq!(classify_failure(mixed), "Gemini is busy or down");
+        assert_eq!(classify_failure(mixed), "the AI models are busy or down");
         let timed_out = "gemma-4-26b-a4b-it failed after 15001ms: TimeoutError The operation was aborted due to timeout";
-        assert_eq!(classify_failure(timed_out), "Gemini is busy or down");
+        assert_eq!(classify_failure(timed_out), "the AI models are busy or down");
         let offline = "TypeError: fetch failed at node:internal/deps/undici ENOTFOUND generativelanguage.googleapis.com";
         assert_eq!(classify_failure(offline), "no internet connection", "a node stack trace isn't a server error");
-        assert_eq!(classify_failure("ApiError: {\"error\":{\"code\":500,\"status\":\"INTERNAL\"}}"), "Gemini is busy or down");
+        assert_eq!(classify_failure("ApiError: {\"error\":{\"code\":500,\"status\":\"INTERNAL\"}}"), "the AI models are busy or down");
     }
 }

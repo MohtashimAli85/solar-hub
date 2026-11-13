@@ -2,7 +2,11 @@ import { listen, type UnlistenFn } from "@/lib/transport";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
+  answerLoadsQuestion,
+  hotplateDone,
+  editLoad,
   forceAutomationCheck,
+  refreshForecast,
   getAutomationConfig,
   getAutomationDecisions,
   getAutomationInsights,
@@ -12,6 +16,7 @@ import {
   openRecordsFolder,
   readScooterNow,
   sendTestNotification,
+  skipHotplateToday,
   skipScooterToday,
   updateAutomationConfig,
 } from "@/lib/tauri";
@@ -28,6 +33,7 @@ export function useAutomation({ withInsights = false, decisionLimit = 0 } = {}) 
   const queryClient = useQueryClient();
   const [checkRequestedAt, setCheckRequestedAt] = useState<number | null>(null);
   const [lastStatusEventAt, setLastStatusEventAt] = useState(0);
+  const [forecastRequestedAt, setForecastRequestedAt] = useState<number | null>(null);
 
   const statusQuery = useQuery({
     queryKey: STATUS_KEY,
@@ -90,6 +96,20 @@ export function useAutomation({ withInsights = false, decisionLimit = 0 } = {}) 
   }, [checkRequestedAt]);
 
   const checking = checkNow.isPending || (checkRequestedAt != null && lastStatusEventAt < checkRequestedAt);
+
+  const forecastRefresh = useMutation({
+    mutationFn: refreshForecast,
+    onMutate: () => setForecastRequestedAt(Date.now()),
+    onError: () => setForecastRequestedAt(null),
+  });
+
+  useEffect(() => {
+    if (forecastRequestedAt == null) return;
+    const id = window.setTimeout(() => setForecastRequestedAt(null), CHECK_TIMEOUT_MS);
+    return () => window.clearTimeout(id);
+  }, [forecastRequestedAt]);
+
+  const refreshingForecast = forecastRefresh.isPending || (forecastRequestedAt != null && lastStatusEventAt < forecastRequestedAt);
   const testNotification = useMutation({ mutationFn: sendTestNotification });
   const openFolder = useMutation({ mutationFn: openRecordsFolder });
   const waterDone = useMutation({
@@ -102,6 +122,22 @@ export function useAutomation({ withInsights = false, decisionLimit = 0 } = {}) 
   });
   const scooterSkip = useMutation({
     mutationFn: skipScooterToday,
+    onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
+  });
+  const loadEdit = useMutation({
+    mutationFn: editLoad,
+    onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
+  });
+  const questionAnswer = useMutation({
+    mutationFn: (yes: boolean) => answerLoadsQuestion(yes),
+    onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
+  });
+  const hotplateFinish = useMutation({
+    mutationFn: hotplateDone,
+    onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
+  });
+  const hotplateSkip = useMutation({
+    mutationFn: skipHotplateToday,
     onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
   });
   const scooterRead = useMutation({
@@ -118,11 +154,17 @@ export function useAutomation({ withInsights = false, decisionLimit = 0 } = {}) 
     saveConfig,
     checkNow,
     checking,
+    forecastRefresh,
+    refreshingForecast,
     testNotification,
     openFolder,
     waterDone,
     geyserDone,
     scooterRead,
     scooterSkip,
+    questionAnswer,
+    loadEdit,
+    hotplateFinish,
+    hotplateSkip,
   };
 }

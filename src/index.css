@@ -156,4 +156,13 @@
     text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
     }
+  /* Only the page area scrolls: a popup or label poking past the shell must
+     not scroll the whole window. */
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+    }
 }

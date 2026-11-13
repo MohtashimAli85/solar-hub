@@ -1,7 +1,7 @@
 import { ArrowLeftRight, CircleCheck, TriangleAlert } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useRef, useState, type FormEvent, type ReactNode } from "react";
-import { CHART_FONT, ChartTooltipBox, VIZ } from "@/components/automation/shared";
+import { CHART_FONT, ChartTooltipBox, chartStep, VIZ } from "@/components/automation/shared";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/switch";
@@ -1433,13 +1433,6 @@ function AttentionStrip({
       <ErrorText error={error} />
     </div>
   );
-}
-
-function chartStep(peak: number): number {
-  if (peak <= 1) return 0.5;
-  if (peak <= 3) return 1;
-  if (peak <= 6) return 2;
-  return 5;
 }
 
 interface ChartRow {

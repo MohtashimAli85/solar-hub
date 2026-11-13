@@ -6,6 +6,7 @@ pub mod history;
 pub mod insights;
 pub mod loads;
 pub mod runner;
+pub mod solar;
 pub mod telemetry;
 pub mod water;
 pub mod weather;
@@ -93,6 +94,17 @@ impl Default for AutomationStatus {
     }
 }
 
+/// The days the app remembers across restarts ("the tank was filled today").
+#[derive(Debug, Clone, Default)]
+pub struct SavedDays {
+    pub water_done_on: Option<NaiveDate>,
+    pub geyser_done_on: Option<NaiveDate>,
+    pub ev_skip_on: Option<NaiveDate>,
+    pub hotplate_on: Option<NaiveDate>,
+    pub hotplate_skip_on: Option<NaiveDate>,
+    pub ev_checked_on: Option<NaiveDate>,
+}
+
 #[derive(Clone)]
 pub struct AutomationState {
     pub config: Arc<Mutex<AutomationConfig>>,
@@ -102,19 +114,27 @@ pub struct AutomationState {
     pub wake: Arc<Notify>,
     /// Set by "Check now": the next tick asks the agent even if nothing is due.
     pub force_check: Arc<AtomicBool>,
+    pub refresh_forecast: Arc<AtomicBool>,
     pub water_done_on: Arc<Mutex<Option<NaiveDate>>>,
     pub geyser_done_on: Arc<Mutex<Option<NaiveDate>>>,
     pub ev_skip_on: Arc<Mutex<Option<NaiveDate>>>,
+    /// The last day the family cooked on the hotplate.
+    pub hotplate_on: Arc<Mutex<Option<NaiveDate>>>,
+    pub hotplate_skip_on: Arc<Mutex<Option<NaiveDate>>>,
+    /// The last day the scooter's daily live read was done.
+    pub ev_checked_on: Arc<Mutex<Option<NaiveDate>>>,
+    /// The family's answer to a question on the solar loads card, picked up
+    /// by the next tick.
+    pub loads_answer: Arc<Mutex<Option<loads::LoadsAnswer>>>,
+    pub loads_edits: Arc<Mutex<Vec<loads::LoadEdit>>>,
+    /// Bumped whenever the family changes a load, so an AI round planned on
+    /// the old state is dropped instead of making them wait for it.
+    pub loads_changed: Arc<Notify>,
+    pub loads_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl AutomationState {
-    pub fn new(
-        config: AutomationConfig,
-        history: HistoryStore,
-        water_done_on: Option<NaiveDate>,
-        geyser_done_on: Option<NaiveDate>,
-        ev_skip_on: Option<NaiveDate>,
-    ) -> Self {
+    pub fn new(config: AutomationConfig, history: HistoryStore, days: SavedDays) -> Self {
         let status = AutomationStatus {
             enabled: config.enabled,
             dry_run: config.dry_run,
@@ -128,9 +148,17 @@ impl AutomationState {
             history,
             wake: Arc::new(Notify::new()),
             force_check: Arc::new(AtomicBool::new(false)),
-            water_done_on: Arc::new(Mutex::new(water_done_on)),
-            geyser_done_on: Arc::new(Mutex::new(geyser_done_on)),
-            ev_skip_on: Arc::new(Mutex::new(ev_skip_on)),
+            refresh_forecast: Arc::new(AtomicBool::new(false)),
+            water_done_on: Arc::new(Mutex::new(days.water_done_on)),
+            geyser_done_on: Arc::new(Mutex::new(days.geyser_done_on)),
+            ev_skip_on: Arc::new(Mutex::new(days.ev_skip_on)),
+            hotplate_on: Arc::new(Mutex::new(days.hotplate_on)),
+            hotplate_skip_on: Arc::new(Mutex::new(days.hotplate_skip_on)),
+            ev_checked_on: Arc::new(Mutex::new(days.ev_checked_on)),
+            loads_answer: Arc::new(Mutex::new(None)),
+            loads_edits: Arc::new(Mutex::new(Vec::new())),
+            loads_changed: Arc::new(Notify::new()),
+            loads_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -150,6 +178,12 @@ impl AutomationState {
         *self.insights.lock().await = insights;
     }
 
+    pub fn loads_touched(&self) {
+        self.loads_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.loads_changed.notify_waiters();
+        self.wake.notify_one();
+    }
+
     pub async fn set_status(&self, update: impl FnOnce(&mut AutomationStatus)) {
         let mut status = self.status.lock().await;
         update(&mut status);
@@ -165,6 +199,18 @@ impl AutomationState {
 
     pub async fn ev_skip_on(&self) -> Option<NaiveDate> {
         *self.ev_skip_on.lock().await
+    }
+
+    pub async fn hotplate_on(&self) -> Option<NaiveDate> {
+        *self.hotplate_on.lock().await
+    }
+
+    pub async fn hotplate_skip_on(&self) -> Option<NaiveDate> {
+        *self.hotplate_skip_on.lock().await
+    }
+
+    pub async fn ev_checked_on(&self) -> Option<NaiveDate> {
+        *self.ev_checked_on.lock().await
     }
 
     pub async fn notify_event(&self, message: impl Into<String>) {

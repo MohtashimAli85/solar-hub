@@ -19,26 +19,52 @@ function lines(rows, format, empty) {
   return rows && rows.length ? rows.map(format).join("\n") : empty;
 }
 
+function dayLine(d) {
+  const refill = d.full_at
+    ? `full again by ${d.full_at}`
+    : d.max_soc != null
+      ? `only reached ${n(d.max_soc, "%")}`
+      : "refill not recorded";
+  const start = d.morning_low_soc != null ? `battery started the morning at ${n(d.morning_low_soc, "%")}` : "morning start not recorded";
+  return `${d.date}: ${n(d.radiation_kwh_m2, " kWh/m²", 1)} radiation, ${n(d.cloud_pct, "%")} cloud, ${n(d.rain_prob_pct, "%")} rain chance → ${start}, ${refill}`;
+}
+
+function refillSection(refill) {
+  if (!refill) return "No recorded refills yet.";
+  const latest = refill.latest_full_at ? `, at the latest by ${refill.latest_full_at}` : "";
+  const lowest = refill.lowest_start_filled != null ? ` The lowest morning start that still filled was ${n(refill.lowest_start_filled, "%")}.` : "";
+  const darkest = refill.darkest_full ? `\n- Darkest day that still filled: ${dayLine(refill.darkest_full)}.` : "";
+  const wettest = refill.wettest_full && refill.wettest_full.date !== refill.darkest_full?.date ? `\n- Rainiest-forecast day that still filled: ${dayLine(refill.wettest_full)}.` : "";
+  return `The battery was full again on ${refill.full_days} of the last ${refill.days} recorded days${latest}.${lowest}${darkest}${wettest}`;
+}
+
 function weatherSection(weather, comingDay) {
   if (!weather) {
-    return `Forecast unavailable right now — assume ${comingDay}'s sun is uncertain and keep a larger reserve.`;
+    return `Forecast unavailable right now, so ${comingDay}'s sun is uncertain: lean on the recent nights below, and keep a few % more only if they show refills were tight.`;
   }
   const next = weather.next_day;
   const nextLine = next
-    ? `The sun that will next charge the battery is ${next.relative}'s (${next.date}): ${n(next.radiation_kwh_m2, " kWh/m²", 1)} radiation, ${n(next.sunshine_h, " h", 1)} sunshine, ${n(next.cloud_pct, "%")} daytime cloud, ${n(next.rain_prob_pct, "%")} rain chance.`
+    ? `${next.relative} (${next.date}): ${n(next.radiation_kwh_m2, " kWh/m²", 1)} radiation (last 7 days averaged ${n(weather.recent_avg_radiation_kwh_m2, " kWh/m²", 1)}), ${n(next.sunshine_h, " h", 1)} sunshine, ${n(next.cloud_pct, "%")} daytime cloud, ${n(next.rain_prob_pct, "%")} rain chance.${weather.expected_pv_kwh_next_day != null ? ` About ${n(weather.expected_pv_kwh_next_day, " kWh", 1)} of solar expected.` : ""}`
     : `No forecast for ${comingDay}.`;
-  const recent = lines(
-    weather.recent_days,
-    (d) =>
-      `- ${d.date}: ${n(d.radiation_kwh_m2, " kWh/m²", 1)} → battery ${d.full_at ? `full by ${d.full_at}` : d.max_soc != null ? `peaked at ${n(d.max_soc, "%")}` : "not recorded"}`,
-    "- (no recent days recorded yet)",
+  return `The sun that will next charge the battery — ${nextLine}
+
+Refill evidence (what the sun actually did on recent days):
+${refillSection(weather.refill)}
+${lines(weather.recent_days, (d) => `- ${dayLine(d)}`, "- (no recent days recorded yet)")}
+
+Tonight's forecast low: ${n(weather.tonight_min_temp_c, "°C", 1)} vs ${n(weather.recent_nights_min_temp_c, "°C", 1)} average over the last week's nights. Cooler nights than recent ones usually mean less fan/AC load than the learned routine; warmer means more.`;
+}
+
+function outageSection(outages) {
+  if (!outages || outages.length === 0) return "- none recorded";
+  return lines(
+    outages,
+    (o) =>
+      o.before_sun_hours > 0
+        ? `- ${o.when}, ${n(o.minutes, " min")}: ${n(o.before_sun_hours, " h", 1)} of it between midnight and the sun taking over → a ${n(o.reserve_to_cover, "%")} reserve would have carried it.`
+        : `- ${o.when}, ${n(o.minutes, " min")}: before midnight or in daylight, when the battery is still high or the sun carries the house; the reserve isn't needed for it.`,
+    "- none recorded",
   );
-  return `${nextLine}
-Last 7 days average radiation: ${n(weather.recent_avg_radiation_kwh_m2, " kWh/m²", 1)}.
-How recent days actually went (radiation → how the battery charged):
-${recent}
-${weather.expected_pv_kwh_next_day != null ? `Expected PV energy next solar day from the array size: ${n(weather.expected_pv_kwh_next_day, " kWh", 1)}.` : ""}
-Tonight's forecast low: ${n(weather.tonight_min_temp_c, "°C", 1)} vs ${n(weather.recent_nights_min_temp_c, "°C", 1)} average over the last week's nights.`;
 }
 
 function smartLoadSection(smart) {
@@ -85,12 +111,11 @@ function eveningSection(input) {
 export function buildPrompt(input) {
   const usable = Math.max(input.soc - input.floor_soc, 0);
   const onBattery = input.on_battery
-    ? `The house has been running on battery ("sbg") since ${input.on_battery_since ?? "earlier tonight"}.${
-        input.previous_plan
-          ? ` Previous plan: keep a ${input.previous_plan.reserve_soc}% reserve, because "${input.previous_plan.reason}".`
-          : ""
-      } Re-evaluate that plan with the fresh numbers below.`
+    ? `The house has been running on battery ("sbg") since ${input.on_battery_since ?? "earlier tonight"}.`
     : `The inverter is currently in "solar" mode — at night the grid powers the house and the battery is kept.`;
+  const previous = input.previous_plan
+    ? ` Your previous plan tonight: a ${input.previous_plan.reserve_soc}% reserve, because "${input.previous_plan.reason}". Keep that reserve unless a fact below has really changed (a new outage, a clearly different forecast, the load running well above or below the routine); don't move it by a few % between checks.`
+    : "";
 
   const routine =
     input.history_nights > 0
@@ -105,9 +130,15 @@ ${lines(input.typical_hourly_load, (h) => `  ${h.hour} ${n(h.load_w, " W")} (≈
 
 Instead of an all-or-nothing call, you set a RESERVE: the house runs on battery until the battery reaches reserve_soc, then the controller automatically switches to "solar" (grid) for the rest of the night. It is completely fine if the battery would not last until sunrise — that is what the reserve is for.
 
-Tonight the hard floor is ${input.floor_soc}%. Even after the switch to "solar", the inverter itself keeps drawing about ${n(input.standby_drain_a, " A", 1)} from the battery until the sun is up, so right now the lowest reserve that still keeps the battery at ${input.floor_soc}% by morning is ${input.min_reserve_soc}% — the controller never stops lower than that. Size the load-shedding backup from the recent outage history below (frequent or long outages → keep more). If ${input.coming_day} looks as sunny as recent days on which the battery filled, a lower reserve is fine; if it looks cloudy or rainy, keep more so the battery isn't left low for days.
+Tonight the hard floor is ${input.floor_soc}%. Even after the switch to "solar", the inverter itself keeps drawing about ${n(input.standby_drain_a, " A", 1)} from the battery until the sun is up, so right now the lowest reserve that still keeps the battery at ${input.floor_soc}% by morning is ${input.min_reserve_soc}% — the controller never stops lower than that. The battery is never charged from the grid: only the sun refills it, and the family wants it back to 100% every day. Every % the battery carries tonight is grid power saved.
 
-${onBattery}
+How to choose reserve_soc — go through these in order:
+1. Start at ${input.min_reserve_soc}%.
+2. Outage backup. The reserve is what carries the house if the grid goes off after the switch to "solar". Each outage below says how many hours of it fell between midnight and the sun taking over (by then the battery is usually down at its reserve) and what reserve would have carried it. Cover the usual night outage of the last week; a single rare very long one doesn't have to be covered in full. Evening and daytime outages don't need the reserve.
+3. Refill check. Go higher than step 2 only if ${input.coming_day}'s sun might not bring the battery back to 100% from that level. Judge it from the refill evidence: if recent days with similar or lower radiation, and similar or higher rain chance, still filled from a similar or lower morning start, the refill is not a reason to keep more. Cloud % and rain chance on their own are not evidence — the radiation figure and the recorded refills are. Keep more only when ${input.coming_day}'s radiation is clearly below every recent day that filled, or recent days didn't fill.
+4. Use the larger of steps 2 and 3, as a whole number.
+
+${onBattery}${previous}
 
 Battery now:
 - SOC: ${n(input.soc, "%")} (${n(usable, "%")} above the floor), capacity ${n(input.rated_capacity_ah, " Ah")}, ${n(input.battery_v, " V", 1)}.
@@ -118,18 +149,17 @@ Battery now:
 ${eveningSection(input)}Household routine:
 ${routine}
 
-How recent nights went (battery use, draw, and whether the next day's sun refilled it):
+How recent nights went (battery use, draw, and the next day's refill):
 ${recentNightsSection(input.recent_nights)}
 
 Projected SOC if the house stays on battery from now (${input.trajectory_basis === "history" ? "current load for this hour, then the learned routine" : "assuming today's current load all night"} — use these numbers, don't redo the arithmetic):
 ${lines(input.trajectory, (p) => `  ${p.time} ${n(p.soc, "%")}`, "  (not available)")}
 
 Grid outages in the last 7 days:
-${lines(input.outages, (o) => `- ${o.when}, ${n(o.minutes, " min")}`, "- none recorded")}
+${outageSection(input.outages)}
 
 Weather and season:
 ${weatherSection(input.weather, input.coming_day)}
-Cooler nights than recent ones usually mean less fan/AC load than the learned routine; warmer means more.
 
 ${smartLoadSection(input.smart_load)}
 
@@ -137,7 +167,7 @@ Decide:
 - mode: "sbg" to run on battery now (until reserve_soc), or "solar" to stay in Solar mode for now, with the grid powering the house (e.g. SOC is already at or near the reserve you'd want, or it's better to wait).
 - reserve_soc: the SOC at which to switch back to "solar" mode, between ${input.min_reserve_soc} and 95.
 - recheck_minutes: when to look again (15–120). Check sooner when the load is changing (family still awake, no history yet) or the battery is close to the reserve; later when things are steady.
-- reason: one or two short sentences naming the factors that drove the reserve (routine, outages, ${input.coming_day}'s sun, season). Refer to that day as "${input.coming_day}". Speak plainly to the homeowner.`;
+- reason: one or two short sentences with the numbers that set the reserve: which outage it covers, and whether ${input.coming_day}'s sun can refill from it (compared with a recent day that did). Refer to that day as "${input.coming_day}". Speak plainly to the homeowner.`;
 }
 
 if (isMainModule(import.meta.url)) {

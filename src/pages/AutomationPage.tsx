@@ -8,7 +8,7 @@ import { RoutineCard } from "@/components/automation/RoutineCard";
 import { Skeleton } from "@/components/automation/shared";
 import { TodayCard } from "@/components/automation/TodayCard";
 import { TonightCard } from "@/components/automation/TonightCard";
-import { GeyserSettings, ScooterSettings } from "@/components/automation/LoadsSettings";
+import { HotplateSettings, GeyserSettings, ScooterSettings } from "@/components/automation/LoadsSettings";
 import { WaterTankSettings } from "@/components/automation/WaterTankSettings";
 import { WeatherCard } from "@/components/automation/WeatherCard";
 import { useAutomation } from "@/hooks/useAutomation";
@@ -105,6 +105,12 @@ export function AutomationPage({ onOpenSettings }: { onOpenSettings: () => void 
           />
 
           <GeyserSettings
+            config={config}
+            saving={automation.saveConfig.isPending}
+            onSave={(next) => automation.saveConfig.mutate(next)}
+          />
+
+          <HotplateSettings
             config={config}
             saving={automation.saveConfig.isPending}
             onSave={(next) => automation.saveConfig.mutate(next)}

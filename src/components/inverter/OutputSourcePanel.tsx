@@ -67,8 +67,8 @@ export function OutputSourcePanel({
         aria-label="Output source priority"
         value={currentValue != null ? [String(currentValue)] : []}
         onValueChange={(next) => {
-          const mode = next[0];
-          if (mode != null && mode !== String(currentValue)) onSet(mode);
+          const mode = next[0] ?? (currentValue != null ? String(currentValue) : undefined);
+          if (mode != null) onSet(mode);
         }}
         disabled={disabled || pending}
         spacing={1}

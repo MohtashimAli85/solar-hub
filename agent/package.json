@@ -6,7 +6,7 @@
   "scripts": {
     "night": "node --env-file=.env night.js",
     "day": "node --env-file=.env day.js",
-    "ev": "node --env-file=.env ev.js",
+    "loads": "node --env-file=.env loads.js",
     "sun": "node --env-file=.env sun.js"
   },
   "dependencies": {

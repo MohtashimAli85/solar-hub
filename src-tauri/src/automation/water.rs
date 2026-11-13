@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::automation::config::AutomationConfig;
 use crate::automation::telemetry::FULL_SOC;
-use crate::automation::weather::{Forecast, PERFORMANCE_RATIO};
+use crate::automation::weather::Forecast;
 
 pub const TITLE: &str = "Water tank";
 const WATCH_MINUTES: i64 = 5;
@@ -43,6 +43,7 @@ pub struct WaterInput<'a> {
     pub pv_w: Option<f64>,
     pub load_w: Option<f64>,
     pub forecast: Option<&'a Forecast>,
+    pub pv_ratio: f64,
     pub config: &'a AutomationConfig,
     pub done_on: Option<NaiveDate>,
 }
@@ -72,13 +73,13 @@ fn hour_text(hour: u32) -> String {
     }
 }
 
-fn forecast_pv_w(forecast: Option<&Forecast>, config: &AutomationConfig, at: NaiveDateTime) -> Option<f64> {
+fn forecast_pv_w(forecast: Option<&Forecast>, config: &AutomationConfig, pv_ratio: f64, at: NaiveDateTime) -> Option<f64> {
     if config.pv_array_watts <= 0.0 {
         return None;
     }
     forecast?
         .radiation_during(at)
-        .map(|radiation| radiation * config.pv_array_watts / 1000.0 * PERFORMANCE_RATIO)
+        .map(|radiation| radiation * config.pv_array_watts / 1000.0 * pv_ratio)
 }
 
 fn best_hour_left(forecast: Option<&Forecast>, now: NaiveDateTime, end_hour: u32) -> bool {
@@ -102,7 +103,7 @@ fn judge(input: &WaterInput) -> Verdict {
     let soc_text = format!("{soc:.0}%");
     let full = soc >= config.water_full_soc.min(FULL_SOC);
     let live_spare = input.pv_w.zip(input.load_w).map(|(pv, load)| pv - load);
-    let forecast_spare = forecast_pv_w(input.forecast, config, input.now).map(|pv| pv - input.load_w.unwrap_or(0.0));
+    let forecast_spare = forecast_pv_w(input.forecast, config, input.pv_ratio, input.now).map(|pv| pv - input.load_w.unwrap_or(0.0));
 
     if full {
         if let Some(spare) = forecast_spare.filter(|spare| *spare >= motor) {
@@ -254,7 +255,7 @@ mod tests {
     }
 
     fn input<'a>(now: NaiveDateTime, soc: f64, pv: f64, load: f64, forecast: Option<&'a Forecast>, config: &'a AutomationConfig) -> WaterInput<'a> {
-        WaterInput { now, soc: Some(soc), pv_w: Some(pv), load_w: Some(load), forecast, config, done_on: None }
+        WaterInput { now, soc: Some(soc), pv_w: Some(pv), load_w: Some(load), forecast, pv_ratio: 0.75, config, done_on: None }
     }
 
     #[test]

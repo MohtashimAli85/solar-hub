@@ -16,6 +16,7 @@ import type {
   RemoteStatus,
   InverterSettings,
   InverterSnapshot,
+  LoadEdit,
   SavedBleDevice,
   ScooterReading,
   SolarSettingsInput,
@@ -98,6 +99,8 @@ export const updateAutomationConfig = (config: AutomationConfig) =>
 
 export const forceAutomationCheck = () => invoke<void>("force_automation_check");
 
+export const refreshForecast = () => invoke<void>("refresh_forecast");
+
 export const getAutomationInsights = () => invoke<AutomationInsights>("get_automation_insights");
 
 export const getAutomationDecisions = (limit: number) =>
@@ -112,6 +115,14 @@ export const markWaterDone = () => invoke<AutomationStatus>("mark_water_done");
 export const markGeyserDone = () => invoke<AutomationStatus>("mark_geyser_done");
 
 export const skipScooterToday = () => invoke<AutomationStatus>("skip_scooter_today");
+
+export const editLoad = (edit: LoadEdit) => invoke<AutomationStatus>("edit_load", { edit });
+
+export const answerLoadsQuestion = (yes: boolean) => invoke<AutomationStatus>("answer_loads_question", { yes });
+
+export const hotplateDone = () => invoke<AutomationStatus>("hotplate_done");
+
+export const skipHotplateToday = () => invoke<AutomationStatus>("skip_hotplate_today");
 
 export const readScooterNow = (powerCycle: boolean) => invoke<ScooterReading>("read_scooter_now", { powerCycle });
 

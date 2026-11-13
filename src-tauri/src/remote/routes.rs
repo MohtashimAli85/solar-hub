@@ -164,11 +164,16 @@ async fn dispatch(app: &AppHandle, command: &str, args: &Value) -> Result<Option
             to_json(auto::update_automation_config(app.clone(), app.state(), arg(args, "config")?).await)
         }
         "force_automation_check" => to_json(auto::force_automation_check(app.state()).await),
+        "refresh_forecast" => to_json(auto::refresh_forecast(app.state()).await),
         "get_automation_insights" => to_json(auto::get_automation_insights(app.state()).await),
         "get_automation_decisions" => to_json(auto::get_automation_decisions(app.state(), arg(args, "limit")?).await),
         "mark_water_done" => to_json(auto::mark_water_done(app.clone(), app.state()).await),
         "mark_geyser_done" => to_json(auto::mark_geyser_done(app.clone(), app.state()).await),
         "skip_scooter_today" => to_json(auto::skip_scooter_today(app.clone(), app.state()).await),
+        "edit_load" => to_json(auto::edit_load(app.clone(), app.state(), arg(args, "edit")?).await),
+        "answer_loads_question" => to_json(auto::answer_loads_question(app.state(), arg(args, "yes")?).await),
+        "hotplate_done" => to_json(auto::hotplate_done(app.state()).await),
+        "skip_hotplate_today" => to_json(auto::skip_hotplate_today(app.clone(), app.state()).await),
         "read_scooter_now" => to_json(auto::read_scooter_now(app.state(), app.state(), arg(args, "powerCycle")?).await),
         "get_geyser_remote" => to_json(auto::get_geyser_remote(app.state()).await),
         "learn_geyser_button" => to_json(auto::learn_geyser_button(app.state(), arg(args, "name")?).await),

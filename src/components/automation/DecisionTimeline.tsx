@@ -14,10 +14,13 @@ const MODE_LABELS: Record<string, string> = {
   scooter_charge: "Scooter · charge today",
   scooter_if_spare: "Scooter · charge if sun is spare",
   scooter_skip: "Scooter · no charge today",
+  loads: "Solar loads · AI plan",
+  loads_scooter_first: "Solar loads · scooter first",
+  loads_fallback: "Solar loads · app's plan (AI failed the checks)",
 };
 
 function outcome(decision: AutomationDecision): string {
-  if (decision.mode.startsWith("scooter_")) return "Planned";
+  if (decision.mode.startsWith("scooter_") || decision.mode.startsWith("loads")) return "Planned";
   if (!decision.applied) return "Kept";
   return decision.dry_run ? "Would switch" : "Switched";
 }

@@ -5,8 +5,7 @@ use inverter::InverterState;
 use state::AppState;
 use tauri::Manager;
 use storage::{
-    get_solar_password, load_app_settings, load_automation_config, load_energy_config, load_ev_skip_on, load_geyser_done_on,
-    load_remote_config, load_water_done_on,
+    get_solar_password, load_app_settings, load_automation_config, load_energy_config, load_remote_config,
 };
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -90,13 +89,7 @@ pub fn run() {
             let history = automation::history::HistoryStore::new(records_root);
             let energy = energy::EnergyState::new(load_energy_config(&handle), history.clone());
             let automation =
-                AutomationState::new(
-                    automation_config,
-                    history,
-                    load_water_done_on(&handle),
-                    load_geyser_done_on(&handle),
-                    load_ev_skip_on(&handle),
-                );
+                AutomationState::new(automation_config, history, storage::load_saved_days(&handle));
             let scooter = scooter::ScooterState::new();
 
             app.manage(inverter.clone());
@@ -155,6 +148,7 @@ pub fn run() {
             automation::commands::get_automation_config,
             automation::commands::update_automation_config,
             automation::commands::force_automation_check,
+            automation::commands::refresh_forecast,
             automation::commands::get_automation_insights,
             automation::commands::get_automation_decisions,
             automation::commands::open_records_folder,
@@ -162,6 +156,10 @@ pub fn run() {
             automation::commands::mark_geyser_done,
             automation::commands::read_scooter_now,
             automation::commands::skip_scooter_today,
+            automation::commands::answer_loads_question,
+            automation::commands::edit_load,
+            automation::commands::hotplate_done,
+            automation::commands::skip_hotplate_today,
             automation::commands::get_geyser_remote,
             automation::commands::learn_geyser_button,
             automation::commands::press_geyser_button,

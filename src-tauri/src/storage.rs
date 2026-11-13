@@ -105,6 +105,47 @@ pub fn save_ev_skip_on(app: &AppHandle, date: chrono::NaiveDate) -> Result<(), S
     save_done_on(app, "ev_skip_on", date)
 }
 
+pub fn load_hotplate_on(app: &AppHandle) -> Option<chrono::NaiveDate> {
+    load_done_on(app, "hotplate_on")
+}
+
+pub fn save_hotplate_on(app: &AppHandle, date: chrono::NaiveDate) -> Result<(), String> {
+    save_done_on(app, "hotplate_on", date)
+}
+
+pub fn load_hotplate_skip_on(app: &AppHandle) -> Option<chrono::NaiveDate> {
+    load_done_on(app, "hotplate_skip_on")
+}
+
+pub fn save_hotplate_skip_on(app: &AppHandle, date: chrono::NaiveDate) -> Result<(), String> {
+    save_done_on(app, "hotplate_skip_on", date)
+}
+
+pub fn load_saved_days(app: &AppHandle) -> crate::automation::SavedDays {
+    crate::automation::SavedDays {
+        water_done_on: load_water_done_on(app),
+        geyser_done_on: load_geyser_done_on(app),
+        ev_skip_on: load_ev_skip_on(app),
+        hotplate_on: load_hotplate_on(app),
+        hotplate_skip_on: load_hotplate_skip_on(app),
+        ev_checked_on: load_done_on(app, "ev_checked_on"),
+    }
+}
+
+/// Sets or clears one of the saved days ("water_done_on", "hotplate_on", …).
+pub fn save_day(app: &AppHandle, key: &str, date: Option<chrono::NaiveDate>) -> Result<(), String> {
+    let store = app
+        .store(AUTOMATION_STORE)
+        .map_err(|error| error.to_string())?;
+    match date {
+        Some(date) => store.set(key, json!(date)),
+        None => {
+            store.delete(key);
+        }
+    }
+    store.save().map_err(|error| error.to_string())
+}
+
 fn load_done_on(app: &AppHandle, key: &str) -> Option<chrono::NaiveDate> {
     app.store(AUTOMATION_STORE)
         .ok()

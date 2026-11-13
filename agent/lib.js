@@ -2,19 +2,22 @@ import { GoogleGenAI } from "@google/genai";
 import SunCalc from "suncalc";
 import { SYSTEM_PROMPT } from "./system.js";
 
-// Tried in order. When one is overloaded or failing, the next one gets the
-// same request; each has its own free-tier limits. Groq's 120B goes first: it
-// answers in a few seconds, while Google's free tier often answers 503 "high
-// demand". Groq's 20B follows Gemini Flash Lite; it's fast but follows the
-// prompt's rules less closely. Models whose provider key isn't set are skipped. Gemma is last: it
-// keeps answering when Gemini is busy, but its reasons read worse. Gemini 2.5
-// Flash and 2.5 Flash Lite aren't offered to new API keys.
+// Tried in order, strongest reasoning first. When one is overloaded or
+// failing, the next one gets the same request; each has its own free-tier
+// limits. Groq's 120B goes first and gets longer: it reasons before answering
+// and the solar-loads prompt is long. Gemini 3.8 Flash reasons better than the
+// Lite models and its "high demand" 503 comes back fast, so it's tried before
+// them. Groq's 20B follows the Lite models; it's fast but follows the
+// prompt's rules less closely. Models whose provider key isn't set are
+// skipped. Gemma is last: it keeps answering when Gemini is busy, but its
+// reasons read worse. Gemini 2.5 Flash and 2.5 Flash Lite aren't offered to
+// new API keys.
 const MODELS = [
-  { provider: "groq", model: "openai/gpt-oss-120b" },
+  { provider: "groq", model: "openai/gpt-oss-120b", timeoutMs: 20_000 },
+  { provider: "gemini", model: "gemini-3.8-flash" },
   { provider: "gemini", model: "gemini-3.5-flash-lite" },
   { provider: "gemini", model: "gemini-3.1-flash-lite" },
   { provider: "groq", model: "openai/gpt-oss-20b" },
-  { provider: "gemini", model: "gemini-3.8-flash" },
   { provider: "gemini", model: "gemini-3.7-flash" },
   { provider: "gemini", model: "gemini-3.6-flash" },
   { provider: "gemini", model: "gemini-3.5-flash" },
@@ -52,9 +55,9 @@ async function readStdin() {
 
 // How long a model may take: early models get a short slot and always leave
 // the reserve for the last one; the last one gets whatever is left.
-function attemptTimeout(isLast, deadline) {
+function attemptTimeout(isLast, deadline, timeoutMs = ATTEMPT_TIMEOUT_MS) {
   const remaining = deadline - Date.now();
-  return isLast ? remaining : Math.min(ATTEMPT_TIMEOUT_MS, remaining - LAST_MODEL_RESERVE_MS);
+  return isLast ? remaining : Math.min(timeoutMs, remaining - LAST_MODEL_RESERVE_MS);
 }
 
 async function askGemini(apiKey, model, { schema, prompt }, signal) {
@@ -73,7 +76,14 @@ async function askGemini(apiKey, model, { schema, prompt }, signal) {
 }
 
 // Groq speaks the OpenAI Chat Completions API; strict JSON schema output
-// needs every object to forbid extra keys.
+// needs every object, nested ones too, to forbid extra keys.
+function strict(schema) {
+  if (Array.isArray(schema)) return schema.map(strict);
+  if (schema === null || typeof schema !== "object") return schema;
+  const out = Object.fromEntries(Object.entries(schema).map(([key, value]) => [key, strict(value)]));
+  return out.type === "object" ? { ...out, additionalProperties: false } : out;
+}
+
 async function askGroq(apiKey, model, { schema, prompt }, signal) {
   const response = await fetch(GROQ_URL, {
     method: "POST",
@@ -87,7 +97,7 @@ async function askGroq(apiKey, model, { schema, prompt }, signal) {
       ],
       response_format: {
         type: "json_schema",
-        json_schema: { name: "decision", strict: true, schema: { ...schema, additionalProperties: false } },
+        json_schema: { name: "decision", strict: true, schema: strict(schema) },
       },
     }),
   });
@@ -112,8 +122,8 @@ export async function generateStructured(request) {
   const deadline = Date.now() + TOTAL_BUDGET_MS;
   const failedProviders = new Set();
   let lastError = new Error("no model could be tried in time");
-  for (const [index, { provider, model }] of available.entries()) {
-    const timeout = attemptTimeout(index === available.length - 1, deadline);
+  for (const [index, { provider, model, timeoutMs }] of available.entries()) {
+    const timeout = attemptTimeout(index === available.length - 1, deadline, timeoutMs);
     if (timeout < MIN_ATTEMPT_MS || failedProviders.has(provider)) continue;
     const { keyName, ask } = PROVIDERS[provider];
     const startedAt = Date.now();

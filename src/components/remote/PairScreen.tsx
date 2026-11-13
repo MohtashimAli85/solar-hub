@@ -46,8 +46,8 @@ export function PairScreen({ onPaired }: { onPaired: () => void }) {
   };
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-background p-4">
-      <form onSubmit={onSubmit} className="w-full max-w-sm space-y-5 rounded-xl border border-border bg-card p-6">
+    <div className="flex h-dvh justify-center overflow-y-auto bg-background p-4">
+      <form onSubmit={onSubmit} className="my-auto w-full max-w-sm space-y-5 rounded-xl border border-border bg-card p-6">
         <div className="flex items-center gap-3">
           <span className="flex size-10 items-center justify-center rounded-md bg-primary text-primary-foreground">
             <SolarHubMark className="size-6" />

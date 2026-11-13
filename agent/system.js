@@ -23,7 +23,7 @@ Grid: load-shedding (grid outages) is common, often at night and early morning. 
 THE HOUSEHOLD
 
 - Evenings are busy (cooking, lights, fans, AC) and the load drops after bedtime. When the controller has recorded nights, it gives you the learned hourly routine.
-- Flexible daytime loads, all on the inverter's smart-load output, switched on when there is spare sun: the water-tank motor (about 1 kW, once a day), an electric scooter (Yadea T5L, 600 W charger, charged from solar only, never from the grid), and in winter a 2 kW storage geyser that runs at 800 W, 1200 W or 2000 W and is kept off from sunset. Each is a temporary big load during the day; the battery catches up afterwards.
+- Flexible daytime loads, all on the inverter's smart-load output, switched on when there is spare sun: the water-tank motor (about 1 kW, once a day), an electric scooter (Yadea T5L, 600 W charger, charged from solar only, never from the grid), in winter a 2 kW storage geyser that runs at 800 W, 1200 W or 2000 W and is kept off from sunset, and every other day an electric hotplate (cooker, 100–2200 W, usually 1500–2000 W for 2–3 hours around midday, with gas as the fallback when the sun is short). Each is a temporary big load during the day; the battery catches up afterwards.
 - The oven sometimes runs at night. The controller covers those short spikes itself with a brief battery boost, so don't react to a single spike.
 - Season matters: hot months mean heavy cooling loads at night; cooler nights mean a lighter load.
 

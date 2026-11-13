@@ -2,18 +2,27 @@ import { AutomationSummaryCard } from "@/components/dashboard/AutomationSummaryC
 import { CommandHero } from "@/components/dashboard/CommandHero";
 import { BillCard } from "@/components/dashboard/BillCard";
 import { UnitsCard } from "@/components/dashboard/UnitsCard";
+import { NowStrip } from "@/components/dashboard/NowStrip";
 import { SolarLoadsCard } from "@/components/dashboard/SolarLoadsCard";
+import { SunCurveCard } from "@/components/dashboard/SunCurveCard";
 import { OutputSourcePanel } from "@/components/inverter/OutputSourcePanel";
 import { useAutomation } from "@/hooks/useAutomation";
 import { useBatteryDevice } from "@/hooks/useBatteryDevice";
 import { useInverterSettings } from "@/hooks/useInverterSettings";
 import { useInverterSnapshot } from "@/hooks/useInverterSnapshot";
+import type { AutomationConfig } from "@/lib/types";
+
+function geyserLevels(config: AutomationConfig | undefined): number[] {
+  if (!config) return [800, 1200, 2000];
+  const { geyser_low_watts: low, geyser_high_watts: high } = config;
+  return [...new Set([Math.min(low, high), Math.max(low, high), low + high])];
+}
 
 export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => void }) {
   const battery = useBatteryDevice();
   const inverter = useInverterSnapshot();
   const settingsHook = useInverterSettings();
-  const automation = useAutomation();
+  const automation = useAutomation({ withInsights: true });
 
   const settings = settingsHook.settings ?? inverter.snapshot?.settings ?? null;
 
@@ -23,6 +32,14 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
         <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Dashboard</h1>
         <p className="text-sm text-muted-foreground">Where your power is coming from and going, and what the automation is doing.</p>
       </div>
+
+      <NowStrip
+        loads={automation.status?.loads}
+        water={automation.status?.water}
+        pending={automation.loadEdit.isPending || automation.questionAnswer.isPending}
+        onEdit={(edit) => automation.loadEdit.mutate(edit)}
+        onAnswer={(yes) => automation.questionAnswer.mutate(yes)}
+      />
 
       <CommandHero
         battery={battery.snapshot}
@@ -52,6 +69,14 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
         </div>
       </div>
 
+      <SunCurveCard
+        forecast={automation.insights?.weather?.today_pv}
+        measured={automation.insights?.weather?.today_measured}
+        fetchedAt={automation.insights?.weather?.fetched_at}
+        refreshing={automation.refreshingForecast}
+        onRefresh={() => automation.forecastRefresh.mutate()}
+      />
+
       <SolarLoadsCard
         water={automation.status?.water}
         loads={automation.status?.loads}
@@ -59,10 +84,17 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
         geyserPending={automation.geyserDone.isPending}
         scooterPending={automation.scooterRead.isPending}
         skipPending={automation.scooterSkip.isPending}
+        hotplatePending={automation.hotplateFinish.isPending || automation.hotplateSkip.isPending}
+        editPending={automation.loadEdit.isPending}
+        config={automation.config}
+        geyserLevels={geyserLevels(automation.config)}
         onWaterDone={() => automation.waterDone.mutate()}
         onGeyserDone={() => automation.geyserDone.mutate()}
-        onReadScooter={() => automation.scooterRead.mutate(false)}
+        onReadScooter={() => automation.scooterRead.mutate(true)}
         onSkipScooter={() => automation.scooterSkip.mutate()}
+        onEdit={(edit) => automation.loadEdit.mutate(edit)}
+        onHotplateDone={() => automation.hotplateFinish.mutate()}
+        onHotplateSkip={() => automation.hotplateSkip.mutate()}
       />
 
       <UnitsCard />
