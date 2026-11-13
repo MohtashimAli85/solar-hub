@@ -15,6 +15,19 @@ export default defineConfig(() => ({
     },
   },
 
+  build: {
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            { name: "charts", test: /node_modules[\\/](recharts|d3-[^\\/]+|victory-vendor)[\\/]/, priority: 2 },
+            { name: "react", test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/, priority: 1 },
+          ],
+        },
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
