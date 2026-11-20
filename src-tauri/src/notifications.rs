@@ -289,6 +289,51 @@ impl Notifier {
     }
 }
 
+impl Notifier {
+    /// A yes/no question as a notification with buttons, so the family can
+    /// answer without opening the app. `answered` gets the reply, or nothing
+    /// when the notification was dismissed or opened instead.
+    pub fn ask(&self, title: &str, body: &str, answered: impl FnOnce(Option<bool>) + Send + 'static) {
+        if !self.inner.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        play_alert_sound();
+        tracing::info!("asking: {title}: {body}");
+        let (title, body) = (title.to_string(), body.to_string());
+        std::thread::spawn(move || answered(ask_blocking(&title, &body)));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ask_blocking(title: &str, body: &str) -> Option<bool> {
+    use mac_notification_sys::{MainButton, Notification, NotificationResponse};
+    let _ = mac_notification_sys::set_application(APP_ID);
+    let response = Notification::new()
+        .title(title)
+        .message(body)
+        .main_button(MainButton::SingleAction("Yes"))
+        .close_button("No")
+        .wait_for_click(true)
+        .send();
+    match response {
+        Ok(NotificationResponse::ActionButton(_)) => Some(true),
+        Ok(NotificationResponse::CloseButton(_)) => Some(false),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::warn!("question notification failed: {error}");
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ask_blocking(_title: &str, _body: &str) -> Option<bool> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+const APP_ID: &str = "com.mohtashimali.solarhub";
+
 /// Plays the macOS Glass alert sound directly. Banner-attached sounds are
 /// suppressed whenever the app is frontmost, so the sound is emitted here to
 /// guarantee exactly one audible cue per notification, focused or not.

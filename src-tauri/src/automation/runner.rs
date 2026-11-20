@@ -18,7 +18,7 @@ use crate::automation::telemetry::{
     DayProjectionInput, EngineReading, SocPoint, FULL_SOC,
 };
 use crate::automation::solar;
-use crate::automation::loads::{self, GeyserCommand, GeyserIntent, LoadsInput, LoadsMemory};
+use crate::automation::loads::{self, GeyserCommand, LoadsInput, LoadsMemory};
 use crate::automation::water::{self, WaterInput, WaterMemory};
 use crate::automation::weather::{self, Forecast, SummaryInput, WeatherSummary};
 use crate::automation::{AutomationState, Phase};
@@ -32,6 +32,10 @@ use crate::storage::AppSettings;
 
 const SBG_MODE: u32 = 1;
 const SOLAR_MODE: u32 = 0;
+/// After the family changes the output mode by day, the app keeps it this long before deciding again.
+const USER_HOLD_MINUTES: i64 = 60;
+/// Below this the panels can't carry a solar-only load, so SBG wouldn't help.
+const SUN_LOAD_MIN_PV_W: f64 = 300.0;
 const STUCK_SBG_SHORTFALL_W: f64 = 300.0;
 const STUCK_SBG_MINUTES: i64 = 3;
 const STUCK_SBG_COOLDOWN: Duration = Duration::from_secs(600);
@@ -131,6 +135,8 @@ const STARTUP_RECHECK: Duration = Duration::from_secs(10);
 /// battery early when it holds at least this much.
 const EARLY_START_MIN_SOC: f64 = 60.0;
 const GEYSER_REMOTE_RECHECK: Duration = Duration::from_secs(600);
+const GEYSER_REMOTE_RETRY: Duration = Duration::from_secs(30);
+const GEYSER_PRESS_GAP: Duration = Duration::from_millis(1500);
 const LOADS_AI_ATTEMPTS: usize = 2;
 const LOADS_RECENT_MINUTES: i64 = 90;
 
@@ -620,7 +626,8 @@ impl Default for NightMemory {
 #[derive(Default)]
 struct DayMemory {
     effective_mode: Option<u32>,
-    paused: bool,
+    /// The family changed the output mode: the app keeps their choice until then.
+    user_hold_until: Option<NaiveDateTime>,
     next_check_at: Option<NaiveDateTime>,
     last_write_at: Option<Instant>,
     last_written_mode: Option<u32>,
@@ -691,6 +698,8 @@ pub struct EngineMemory {
     stuck_sbg_since: Option<Instant>,
     last_sbg_kick_at: Option<Instant>,
     loads: LoadsMemory,
+    loads_restored: bool,
+    loads_saved: Option<loads::SavedLoads>,
     geyser_remote: Option<(String, Instant, bool)>,
 }
 
@@ -1033,6 +1042,16 @@ async fn loads_reminder(
     let generation = state.loads_generation.load(std::sync::atomic::Ordering::SeqCst);
     let answer = state.loads_answer.lock().await.take();
     let edits = std::mem::take(&mut *state.loads_edits.lock().await);
+    let geyser_request = state.geyser_request.lock().await.take();
+    let (geyser_heard_at, geyser_heard_button) = geyser_heard(config, now).await.unzip();
+    if !memory.loads_restored {
+        memory.loads_restored = true;
+        if let Some(saved) = crate::storage::load_saved_loads(services.app) {
+            if memory.loads.restore(saved, now) {
+                tracing::info!("loads: picked up what was on before the restart");
+            }
+        }
+    }
     let recent_from = ctx.samples.partition_point(|sample| sample.at < now - chrono::Duration::minutes(LOADS_RECENT_MINUTES));
     let ev_reader_busy = scooter.busy().await;
     let grid_before = memory.loads.grid_now().is_some();
@@ -1047,6 +1066,11 @@ async fn loads_reminder(
             volts: pack_volts(reading),
             max_charge_a: reading.max_charge_a,
             charge_a: reading.charge_a,
+            battery_w: reading
+                .battery_a
+                .or(reading.charge_a)
+                .or(Some(-reading.discharge_a))
+                .map(|amps| amps * pack_volts(reading)),
             pv_w: reading.pv_w,
             load_w: reading.load_w,
             forecast: ctx.forecast.as_ref(),
@@ -1069,14 +1093,36 @@ async fn loads_reminder(
             ev_reading,
             ev_reader_busy,
             remote_ready,
+            geyser_request,
+            geyser_heard_at,
+            geyser_heard_button: geyser_heard_button.flatten(),
         },
     );
     for (title, body) in &step.notify {
         services.notifier.send(title, body);
     }
+    for ask in &step.asks {
+        ask_family(state, services, ask, today);
+    }
+    let saved = memory.loads.saved(now);
+    if memory.loads_saved.as_ref().is_none_or(|last| saved.differs(last)) {
+        match crate::storage::save_saved_loads(services.app, &saved) {
+            Ok(()) => memory.loads_saved = Some(saved),
+            Err(error) => tracing::warn!("could not save the loads: {error}"),
+        }
+    }
+    if let Some(line) = &step.log {
+        loads_log(state, now, line);
+    }
     if let Some(command) = step.geyser_command {
-        let ok = press_geyser(config, command).await;
-        memory.loads.geyser_sent(command, now, ok);
+        let buttons: Vec<&str> = command.buttons.iter().map(|button| button.as_str()).collect();
+        tracing::info!("geyser: pressing {buttons:?} for {:?} — {}", command.intent, step.status.geyser.row.note.as_deref().unwrap_or(""));
+        let ok = press_geyser(config, &command).await;
+        loads_log(state, now, &serde_json::json!({ "at": now, "pressed": buttons, "ok": ok }));
+        if !ok {
+            services.notifier.send(loads::GEYSER_TITLE, "The ESP32 geyser remote didn't answer, so nothing was pressed. Back to reminders for today.");
+        }
+        memory.loads.geyser_sent(&command, now, ok);
     }
     if let Some(power_cycle) = step.ev_read {
         spawn_scooter_read(state, services, config, power_cycle);
@@ -1109,19 +1155,67 @@ async fn loads_reminder(
     next_at
 }
 
+/// When a geyser button last went out: the family's own remote heard by the
+/// ESP32's receiver, or a press on the ESP32's web page. The app's own presses
+/// show up here too, which is harmless: they count as recent already.
+async fn geyser_heard(config: &AutomationConfig, now: NaiveDateTime) -> Option<(NaiveDateTime, Option<Button>)> {
+    if config.dry_run || !config.geyser_auto_control || config.geyser_esp32_host.is_empty() {
+        return None;
+    }
+    let status = GeyserRemote::new(&config.geyser_esp32_host).status().await.ok()?;
+    let heard = status.last_heard.as_deref().filter(|name| !name.is_empty()).zip(status.last_heard_s_ago);
+    let pressed = status.last_button.as_deref().filter(|name| !name.is_empty()).zip(status.last_pressed_s_ago);
+    let (name, ago) = heard.into_iter().chain(pressed).min_by_key(|(_, ago)| *ago)?;
+    Some((now - chrono::Duration::seconds(ago as i64), Button::parse(name)))
+}
+
+/// Sends a question with Yes and No buttons; the answer goes where the
+/// dashboard's own buttons would send it.
+fn ask_family(state: &AutomationState, services: &Services<'_>, ask: &loads::Ask, today: chrono::NaiveDate) {
+    let (state, app, about) = (state.clone(), services.app.clone(), ask.about);
+    services.notifier.ask(ask.title, &ask.body, move |reply| {
+        let Some(yes) = reply else { return };
+        tauri::async_runtime::spawn(async move {
+            match about {
+                loads::AskAbout::Loads => {
+                    *state.loads_answer.lock().await = Some(if yes { loads::LoadsAnswer::Yes } else { loads::LoadsAnswer::No });
+                    state.set_status(|status| status.loads.question = None).await;
+                }
+                loads::AskAbout::Tank => {
+                    if yes {
+                        match crate::storage::save_day(&app, "water_done_on", Some(today)) {
+                            Ok(()) => *state.water_done_on.lock().await = Some(today),
+                            Err(error) => tracing::warn!("could not save the filled tank: {error}"),
+                        }
+                    }
+                    state.loads_edits.lock().await.push(loads::LoadEdit {
+                        load: loads::LoadKind::Water,
+                        state: if yes { loads::EditState::Done } else { loads::EditState::Off },
+                        watts: None,
+                        kwh: None,
+                        soc: None,
+                    });
+                }
+            }
+            tracing::info!("loads: answered {} from the notification", if yes { "yes" } else { "no" });
+            state.loads_touched();
+        });
+    });
+}
+
 async fn geyser_remote_ready(memory: &mut EngineMemory, config: &AutomationConfig) -> bool {
     let host = &config.geyser_esp32_host;
     if config.dry_run || !config.geyser_auto_control || host.is_empty() {
         return false;
     }
     if let Some((checked_host, at, ready)) = &memory.geyser_remote {
-        if checked_host == host && at.elapsed() < GEYSER_REMOTE_RECHECK {
+        let wait = if *ready { GEYSER_REMOTE_RECHECK } else { GEYSER_REMOTE_RETRY };
+        if checked_host == host && at.elapsed() < wait {
             return *ready;
         }
     }
-    let needed = [Button::Power, Button::W800, Button::W1200, Button::W2000];
     let ready = match GeyserRemote::new(host).status().await {
-        Ok(status) => needed.iter().all(|button| status.is_learned(*button)),
+        Ok(_) => true,
         Err(error) => {
             tracing::warn!("geyser remote unavailable: {error}");
             false
@@ -1131,23 +1225,18 @@ async fn geyser_remote_ready(memory: &mut EngineMemory, config: &AutomationConfi
     ready
 }
 
-async fn press_geyser(config: &AutomationConfig, command: GeyserCommand) -> bool {
-    let button = match command.intent {
-        _ if command.press_power => Some(Button::Power),
-        GeyserIntent::On(watts) => Button::for_watts(watts.round() as u32),
-        GeyserIntent::Off => Some(Button::Power),
-    };
-    let Some(button) = button else {
-        tracing::warn!("no geyser button for {:?}", command.intent);
-        return false;
-    };
-    match GeyserRemote::new(&config.geyser_esp32_host).send(button).await {
-        Ok(()) => true,
-        Err(error) => {
+async fn press_geyser(config: &AutomationConfig, command: &GeyserCommand) -> bool {
+    let remote = GeyserRemote::new(&config.geyser_esp32_host);
+    for (index, button) in command.buttons.iter().enumerate() {
+        if index > 0 {
+            tokio::time::sleep(GEYSER_PRESS_GAP).await;
+        }
+        if let Err(error) = remote.press(*button).await {
             tracing::warn!("geyser remote could not press {}: {error}", button.as_str());
-            false
+            return false;
         }
     }
+    true
 }
 
 /// Bluetooth reads take a while, so they run beside the engine and the
@@ -1204,7 +1293,20 @@ async fn ask_loads(
                 return;
             }
         };
-        match checker.check(&decision) {
+        let checked = checker.check(&decision);
+        loads_log(
+            state,
+            now,
+            &serde_json::json!({
+                "at": now,
+                "ai_attempt": attempt,
+                "model": decision.model,
+                "running": decision.running.iter().map(|r| format!("{} {:.0} W since {}", r.load, r.watts, r.since)).collect::<Vec<_>>(),
+                "reason": decision.reason,
+                "problems": checked.as_ref().err(),
+            }),
+        );
+        match checked {
             Ok(verified) => {
                 let scooter_changed = memory.scooter_first_today(now) != Some(decision.scooter_first);
                 memory.apply_ai(verified, &decision, load_w, now);
@@ -1224,6 +1326,12 @@ async fn ask_loads(
     if let Some((decision, problems)) = rejected {
         record_loads_decision(state, now, "loads_fallback", &problems.join(" "), decision.model.clone());
         memory.ai_rejected(now, problems, decision.reason, decision.model);
+    }
+}
+
+fn loads_log(state: &AutomationState, now: NaiveDateTime, line: &serde_json::Value) {
+    if let Err(error) = state.history.append_loads_log(now, line) {
+        tracing::warn!("could not write the loads log: {error}");
     }
 }
 
@@ -2491,7 +2599,7 @@ async fn day_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &Engi
     watch_low_pv(engine, &mut memory.day, reading, ctx).await;
     let sleep_for = day_decide(engine, memory, reading, ctx).await;
     let day = &memory.day;
-    let dim_on_sbg = !day.paused
+    let dim_on_sbg = day.user_hold_until.is_none()
         && day.effective_mode == Some(SBG_MODE)
         && day.sky.is_some_and(|(sky, _)| sky != Sky::Sun);
     let sleep_for = if dim_on_sbg { sleep_for.min(DIM_TICK) } else { sleep_for };
@@ -2534,16 +2642,33 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
     let config = engine.config;
     let now = ctx.clock.now;
     let grid_loads = memory.loads.grid_now().map(str::to_string);
+    let sun_load = memory.loads.sun_only_load();
     let day = &mut memory.day;
-    if day.paused {
-        engine.set_phase(Phase::Paused).await;
-        return normal_interval(config);
+    if let Some(hold) = day.user_hold_until {
+        if now < hold {
+            day.next_check_at = Some(hold);
+            engine.set_phase(Phase::Paused).await;
+            return until(now, Some(hold), normal_interval(config));
+        }
+        day.user_hold_until = None;
+        day.next_check_at = None;
     }
     if guardrails::user_took_over(reading.mode, day.last_written_mode, config.dry_run) {
-        day.paused = true;
-        engine.notify_info("You changed the output mode — automation paused until tonight").await;
+        let hold = (now + chrono::Duration::minutes(USER_HOLD_MINUTES)).min(ctx.clock.evening_start_on(now.date()));
+        day.user_hold_until = Some(hold);
+        day.last_written_mode = reading.mode;
+        day.effective_mode = reading.mode;
+        day.last_switch_at = Some(now);
+        day.next_check_at = Some(hold);
+        engine
+            .notify_info(&format!(
+                "You switched the output to {} — the app keeps it and decides again at {}",
+                mode_label(reading.mode).unwrap_or_default(),
+                clock_time(hold)
+            ))
+            .await;
         engine.set_phase(Phase::Paused).await;
-        return normal_interval(config);
+        return until(now, Some(hold), normal_interval(config));
     }
     if day.effective_mode.is_none() || !config.dry_run {
         day.effective_mode = reading.mode.or(day.effective_mode);
@@ -2559,6 +2684,23 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
         {
             engine.record(now, Window::Day, "solar", None, None, None, true, &reason);
         }
+        engine.set_reason(&reason).await;
+        return normal_interval(config);
+    }
+
+    let refills = lend_budget(ctx, reading, config).is_none_or(|lend| lend > 0.0);
+    let sun_up = reading.pv_w.is_some_and(|pv| pv >= SUN_LOAD_MIN_PV_W);
+    if let Some(load) = sun_load.filter(|_| refills && sun_up) {
+        let reason = format!(
+            "SBG — {load} charges on the panels, not the grid; the battery charges less meanwhile and the sun refills it later."
+        );
+        if day.effective_mode != Some(SBG_MODE) {
+            let notice = format!("switch to SBG — {load} charges on the panels, not the grid; the battery charges less meanwhile");
+            if switch_day_mode(engine, day, reading, now, SBG_MODE, &notice).await {
+                engine.record(now, Window::Day, "sbg", None, None, None, true, &reason);
+            }
+        }
+        day.next_check_at = None;
         engine.set_reason(&reason).await;
         return normal_interval(config);
     }

@@ -4158,6 +4158,7 @@ dependencies = [
  "hmac",
  "keyring",
  "local-ip-address",
+ "mac-notification-sys",
  "md-5",
  "rand 0.8.8",
  "reqwest 0.12.28",

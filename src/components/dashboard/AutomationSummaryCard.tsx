@@ -28,7 +28,7 @@ export function AutomationSummaryCard({ status, onOpen }: { status: AutomationSt
       ? status.blocked_reason ?? "Needs setup."
       : status.phase === "paused"
         ? status.last_event
-          ? `${status.last_event.message} (${pausedAt}).`
+          ? `${pausedAt}: ${status.last_event.message}.`
           : "Paused until the next window."
         : status.ai_reason ?? "Waiting for the first check…";
 

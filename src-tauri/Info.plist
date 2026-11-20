@@ -6,6 +6,12 @@
 	<string>Solar Hub connects to JBD battery management systems over Bluetooth to read battery telemetry.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Solar Hub connects to JBD battery management systems over Bluetooth to read battery telemetry.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Solar Hub talks to the ESP32 geyser remote on your home network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+	</array>
 	<key>NSAppSleepDisabled</key>
 	<true/>
 </dict>

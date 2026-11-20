@@ -47,6 +47,11 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
         inverter={inverter.snapshot ?? null}
         inverterUpdatedAt={inverter.updatedAt}
         sunset={automation.status?.sunset ?? null}
+        outlook={
+          automation.status?.loads
+            ? { fullBy: automation.status.loads.full_by, sunsetSoc: automation.status.loads.projected_sunset_soc }
+            : null
+        }
         batteryLoading={battery.isLoading}
         inverterLoading={inverter.isLoading}
       />
@@ -90,6 +95,8 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
         geyserLevels={geyserLevels(automation.config)}
         onWaterDone={() => automation.waterDone.mutate()}
         onGeyserDone={() => automation.geyserDone.mutate()}
+        onSwitchGeyser={(watts) => automation.geyserSwitch.mutate(watts)}
+        switchError={automation.geyserSwitch.error ? String(automation.geyserSwitch.error) : null}
         onReadScooter={() => automation.scooterRead.mutate(true)}
         onSkipScooter={() => automation.scooterSkip.mutate()}
         onEdit={(edit) => automation.loadEdit.mutate(edit)}

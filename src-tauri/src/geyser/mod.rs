@@ -1,39 +1,35 @@
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The geyser panel's buttons as the ESP32 firmware names them. 800 and 1200
+/// each toggle one heating element; 2000 W is both elements on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum Button {
+    #[serde(rename = "power")]
     Power,
+    #[serde(rename = "800")]
     W800,
+    #[serde(rename = "1200")]
     W1200,
-    W2000,
+    #[serde(rename = "up")]
     TempUp,
+    #[serde(rename = "down")]
     TempDown,
 }
 
 impl Button {
-    pub const ALL: [Button; 6] = [
-        Button::Power,
-        Button::W800,
-        Button::W1200,
-        Button::W2000,
-        Button::TempUp,
-        Button::TempDown,
-    ];
+    pub const ALL: [Button; 5] = [Button::Power, Button::W800, Button::W1200, Button::TempUp, Button::TempDown];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Button::Power => "power",
-            Button::W800 => "w800",
-            Button::W1200 => "w1200",
-            Button::W2000 => "w2000",
-            Button::TempUp => "temp_up",
-            Button::TempDown => "temp_down",
+            Button::W800 => "800",
+            Button::W1200 => "1200",
+            Button::TempUp => "up",
+            Button::TempDown => "down",
         }
     }
 
@@ -42,7 +38,6 @@ impl Button {
             Button::Power => "On/Off",
             Button::W800 => "800 W",
             Button::W1200 => "1200 W",
-            Button::W2000 => "2000 W",
             Button::TempUp => "Temperature up",
             Button::TempDown => "Temperature down",
         }
@@ -52,42 +47,19 @@ impl Button {
         let name = name.trim();
         Self::ALL.into_iter().find(|button| button.as_str().eq_ignore_ascii_case(name))
     }
-
-    pub fn for_watts(watts: u32) -> Option<Button> {
-        match watts {
-            800 => Some(Button::W800),
-            1200 => Some(Button::W1200),
-            2000 => Some(Button::W2000),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LearnResult {
-    pub button: String,
-    pub ok: bool,
-    pub error: Option<String>,
-    #[serde(default)]
-    pub length: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RemoteStatus {
-    #[serde(default)]
-    pub learned: BTreeMap<String, bool>,
-    pub learning: Option<String>,
-    #[serde(default)]
-    pub last_learn: Option<LearnResult>,
-    pub last_sent: Option<String>,
-    pub uptime_s: Option<u64>,
+    pub ip: Option<String>,
     pub rssi: Option<i32>,
-}
-
-impl RemoteStatus {
-    pub fn is_learned(&self, button: Button) -> bool {
-        self.learned.get(button.as_str()).copied().unwrap_or(false)
-    }
+    pub uptime_s: Option<u64>,
+    #[serde(default)]
+    pub last_button: Option<String>,
+    pub last_pressed_s_ago: Option<u64>,
+    #[serde(default)]
+    pub last_heard: Option<String>,
+    pub last_heard_s_ago: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -119,32 +91,26 @@ impl GeyserRemote {
         parse_status(code, &body)
     }
 
-    pub async fn learn(&self, button: Button) -> Result<(), String> {
-        self.post("learn", button).await
-    }
-
-    pub async fn send(&self, button: Button) -> Result<(), String> {
-        self.post("send", button).await
-    }
-
-    pub async fn forget(&self, button: Button) -> Result<(), String> {
-        self.post("forget", button).await
-    }
-
-    async fn post(&self, action: &str, button: Button) -> Result<(), String> {
+    pub async fn press(&self, button: Button) -> Result<(), String> {
         let response = self
             .http
-            .post(button_url(&self.base, action, button))
+            .post(press_url(&self.base, button))
             .send()
             .await
             .map_err(|error| self.unreachable(&error))?;
         let code = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();
-        check_reply(code, &body, button)
+        check_reply(code, &body)
     }
 
     fn unreachable(&self, error: &reqwest::Error) -> String {
-        tracing::warn!("geyser remote request to {} failed: {error}", self.base);
+        let mut cause = error.to_string();
+        let mut source = std::error::Error::source(error);
+        while let Some(inner) = source {
+            cause.push_str(&format!(": {inner}"));
+            source = inner.source();
+        }
+        tracing::warn!("geyser remote request to {} failed: {cause}", self.base);
         if error.is_timeout() {
             format!("geyser remote at {} didn't answer within {} s", self.base, TIMEOUT.as_secs())
         } else {
@@ -163,8 +129,8 @@ fn base_url(host: &str) -> String {
     format!("http://{}", host.trim_end_matches('/'))
 }
 
-fn button_url(base: &str, action: &str, button: Button) -> String {
-    format!("{base}/{action}?button={}", button.as_str())
+fn press_url(base: &str, button: Button) -> String {
+    format!("{base}/press?button={}", button.as_str())
 }
 
 fn parse_status(code: u16, body: &str) -> Result<RemoteStatus, String> {
@@ -174,16 +140,13 @@ fn parse_status(code: u16, body: &str) -> Result<RemoteStatus, String> {
     serde_json::from_str(body).map_err(|_| "geyser remote sent a reply the app doesn't understand".to_string())
 }
 
-fn check_reply(code: u16, body: &str, button: Button) -> Result<(), String> {
+fn check_reply(code: u16, body: &str) -> Result<(), String> {
     if (200..300).contains(&code) {
         return Ok(());
     }
-    let error = serde_json::from_str::<Reply>(body).ok().and_then(|reply| reply.error);
-    match (code, error.as_deref()) {
-        (404, Some("not learned")) => Err(format!("button not learned yet: {}", button.label())),
-        (409, _) => Err("the geyser remote is still learning a button — try again in 20 seconds".into()),
-        (_, Some(error)) => Err(format!("geyser remote answered {code}: {error}")),
-        _ => Err(format!("geyser remote answered {code}")),
+    match serde_json::from_str::<Reply>(body).ok().and_then(|reply| reply.error) {
+        Some(error) => Err(format!("geyser remote answered {code}: {error}")),
+        None => Err(format!("geyser remote answered {code}")),
     }
 }
 
@@ -195,8 +158,9 @@ mod tests {
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use serde_json::{json, Value};
+    use std::collections::BTreeMap;
 
-    const FIRMWARE_STATUS: &str = r#"{"ok":true,"learned":{"power":true,"w800":true,"w1200":false,"w2000":false,"temp_up":false,"temp_down":false},"learning":null,"last_learn":{"button":"w800","ok":true,"error":null,"length":243},"last_sent":"w800","last_sent_ms_ago":1234,"uptime_s":3600,"rssi":-61,"version":"1"}"#;
+    const FIRMWARE_STATUS: &str = r#"{"ok":true,"ip":"192.168.1.100","rssi":-68,"uptime_s":3600,"last_button":"800","last_pressed_s_ago":12,"last_heard":"800","last_heard_s_ago":12,"learning":false,"learn_result":"","learned":0}"#;
 
     #[test]
     fn buttons_round_trip_through_their_names() {
@@ -204,80 +168,63 @@ mod tests {
             assert_eq!(Button::parse(button.as_str()), Some(button));
             assert_eq!(serde_json::to_value(button).unwrap(), json!(button.as_str()));
         }
-        assert_eq!(Button::parse(" TEMP_UP "), Some(Button::TempUp));
-        assert_eq!(Button::parse("w1000"), None);
-    }
-
-    #[test]
-    fn watts_pick_the_power_buttons() {
-        assert_eq!(Button::for_watts(800), Some(Button::W800));
-        assert_eq!(Button::for_watts(1200), Some(Button::W1200));
-        assert_eq!(Button::for_watts(2000), Some(Button::W2000));
-        assert_eq!(Button::for_watts(1000), None);
+        assert_eq!(Button::parse(" UP "), Some(Button::TempUp));
+        assert_eq!(Button::parse("2000"), None);
     }
 
     #[test]
     fn hosts_become_plain_http_base_urls() {
-        assert_eq!(base_url("solarhub-geyser.local"), "http://solarhub-geyser.local");
-        assert_eq!(base_url(" http://192.168.1.50/ "), "http://192.168.1.50");
+        assert_eq!(base_url("geyser.local"), "http://geyser.local");
+        assert_eq!(base_url(" http://192.168.1.100/ "), "http://192.168.1.100");
         assert_eq!(base_url("HTTPS://geyser.local:8080"), "http://geyser.local:8080");
-        assert_eq!(
-            button_url("http://solarhub-geyser.local", "send", Button::W1200),
-            "http://solarhub-geyser.local/send?button=w1200"
-        );
+        assert_eq!(press_url("http://192.168.1.100", Button::W1200), "http://192.168.1.100/press?button=1200");
     }
 
     #[test]
     fn status_parses_the_firmware_reply() {
         let status = parse_status(200, FIRMWARE_STATUS).unwrap();
-        assert!(status.is_learned(Button::Power));
-        assert!(!status.is_learned(Button::W2000));
-        assert_eq!(status.learning, None);
-        assert_eq!(status.last_sent.as_deref(), Some("w800"));
+        assert_eq!(status.ip.as_deref(), Some("192.168.1.100"));
+        assert_eq!(status.rssi, Some(-68));
         assert_eq!(status.uptime_s, Some(3600));
-        assert_eq!(status.rssi, Some(-61));
-        assert_eq!(status.last_learn.unwrap().length, Some(243));
+        assert_eq!(status.last_button.as_deref(), Some("800"));
+        assert_eq!(status.last_heard_s_ago, Some(12));
 
-        let learning = parse_status(200, r#"{"ok":true,"learned":{},"learning":"power","last_sent":null,"uptime_s":5,"rssi":-70}"#).unwrap();
-        assert_eq!(learning.learning.as_deref(), Some("power"));
-        assert_eq!(learning.last_learn, None);
+        let fresh = parse_status(200, r#"{"ok":true,"ip":"192.168.1.100","rssi":-70,"uptime_s":5,"last_button":"","last_pressed_s_ago":null,"last_heard":"","last_heard_s_ago":null}"#).unwrap();
+        assert_eq!(fresh.last_pressed_s_ago, None);
         assert!(parse_status(500, FIRMWARE_STATUS).is_err());
         assert!(parse_status(200, "<html>").is_err());
     }
 
     #[test]
-    fn errors_name_the_button() {
+    fn errors_carry_the_firmware_message() {
         assert_eq!(
-            check_reply(404, r#"{"ok":false,"error":"not learned"}"#, Button::W800),
-            Err("button not learned yet: 800 W".into())
-        );
-        assert_eq!(
-            check_reply(400, r#"{"ok":false,"error":"unknown button"}"#, Button::Power),
+            check_reply(400, r#"{"ok":false,"error":"unknown button"}"#),
             Err("geyser remote answered 400: unknown button".into())
         );
-        assert!(check_reply(409, r#"{"ok":false,"error":"learning"}"#, Button::Power).unwrap_err().contains("still learning"));
-        assert_eq!(check_reply(200, r#"{"ok":true}"#, Button::Power), Ok(()));
+        assert_eq!(check_reply(502, "oops"), Err("geyser remote answered 502".into()));
+        assert_eq!(check_reply(200, r#"{"ok":true,"button":"power"}"#), Ok(()));
     }
 
     #[tokio::test]
     async fn talks_to_a_device_over_http() {
-        async fn send(Query(params): Query<BTreeMap<String, String>>) -> (StatusCode, Json<Value>) {
+        async fn press(Query(params): Query<BTreeMap<String, String>>) -> (StatusCode, Json<Value>) {
             match params.get("button").map(String::as_str) {
-                Some("w800") => (StatusCode::OK, Json(json!({"ok": true}))),
-                _ => (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "not learned"}))),
+                Some("power" | "800" | "1200" | "up" | "down") => (StatusCode::OK, Json(json!({"ok": true}))),
+                _ => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "unknown button"}))),
             }
         }
         let router = Router::new()
             .route("/status", get(|| async { FIRMWARE_STATUS }))
-            .route("/send", post(send));
+            .route("/press", post(press));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
         let remote = GeyserRemote::new(&address.to_string());
-        assert!(remote.status().await.unwrap().is_learned(Button::W800));
-        assert_eq!(remote.send(Button::W800).await, Ok(()));
-        assert_eq!(remote.send(Button::W2000).await, Err("button not learned yet: 2000 W".into()));
+        assert_eq!(remote.status().await.unwrap().rssi, Some(-68));
+        for button in Button::ALL {
+            assert_eq!(remote.press(button).await, Ok(()));
+        }
     }
 
     #[tokio::test]

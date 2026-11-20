@@ -69,6 +69,14 @@ function days(rows) {
     .join("\n");
 }
 
+function room(input) {
+  if (input.load_w == null || input.house_usual_w == null) return "";
+  const most = input.house_usual_w + Math.max(input.house_usual_w * 0.5, 400);
+  const low = Math.max(0, Math.round(input.load_w - most));
+  const high = Math.round(input.load_w + 150);
+  return ` So the loads you list as running must add up to between ${low} and ${high} W.`;
+}
+
 export function buildPrompt(input) {
   const believed =
     input.believed.length === 0 ? "nothing" : input.believed.map((b) => `${b.load} at ${n(b.watts, " W")} since ${b.since}`).join(", ");
@@ -90,7 +98,7 @@ House battery: ${n(input.soc, "%")} of ${n(input.battery_kwh, " kWh", 1)}${input
 
 Some loads are marked "Required today" below. Those run today whatever the sun: give each its full run even when the spare sun can't carry it, placed in the sunniest hours so the grid has to add as little as possible. While the battery can't lend it and still be full by sunset, the app switches to Solar mode and the grid tops the load up; the battery isn't drained for it. Loads that aren't required still get only spare sun; on a dark day the hotplate waits and they cook on gas.
 
-Now: the house uses ${n(input.load_w, " W")} and the panels give ${n(input.pv_w, " W")}. Without the loads below, the house usually uses about ${n(input.house_usual_w, " W")} at this hour.${held}${sky}
+Now: the house uses ${n(input.load_w, " W")} and the panels give ${n(input.pv_w, " W")}. Without the loads below, the house usually uses about ${n(input.house_usual_w, " W")} at this hour.${room(input)}${held}${sky}
 Readings, last 90 minutes (oldest first):
 ${readings(input.recent)}
 What the app believes is on: ${believed}.
@@ -109,7 +117,7 @@ Coming days:
 ${days(input.next_days)}
 ${answers}${previous}${problems}
 Answer:
-- running: every load on right now, its watts and since when. The house load must equal the usual house plus what you list (give or take ~150 W). Read the jumps: +1200 W that stayed is the geyser at 1200 W or the hotplate; two loads can change between readings (the motor going off while the geyser comes on shows as about +200 W), and a load already on before the first reading has no jump at all. Don't drop a load the app believes is on unless the readings show it went off.
+- running: every load on right now, its watts and since when. The house load must equal the usual house plus what you list (give or take ~150 W). Read the jumps: +1200 W that stayed is the geyser at 1200 W or the hotplate; two loads can change between readings (the motor going off while the geyser comes on shows as about +200 W), and a load already on before the first reading has no jump at all. Don't drop a load the app believes is on unless the readings show it went off, but the app's beliefs can be wrong: if they add up to more than the house is using, leave out what can't be on. Load above the usual house that the geyser, motor and scooter don't explain (a step of about 800–2200 W) is the hotplate: list it with its watts, even on a day that isn't a cooking day.
 - sure: false only when two explanations fit about equally (the geyser at 1200 W or the hotplate at 1200 W). Then question: one short yes/no question naming your best guess, e.g. "Is the geyser on at 1200 W?", and list that guess in running. Otherwise sure: true and question "".
 - plan: today's runs, one per load at most: {load, start, end, watts}. A load that's on and should stay on starts now (${input.time}); a load on now but left out of the plan means "switch it off now". Leave out loads that shouldn't run. The geyser runs at exactly 800, 1200 or 2000 W; the hotplate one level for the whole session; the scooter and the motor at their own watts. Keep each load inside its hours and the battery rules. When the battery is full and the panels are held back, start loads now rather than later.
 - scooter_first: true only if the scooter goes ahead of the others today.

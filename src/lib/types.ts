@@ -100,7 +100,9 @@ export interface AutomationConfig {
   geyser_low_watts: number;
   geyser_high_watts: number;
   geyser_daily_kwh: number;
+  geyser_winter_only: boolean;
   geyser_tank_litres: number;
+  inverter_max_w: number;
   geyser_start_hour: number;
   geyser_end_hour: number;
   geyser_esp32_host: string;
@@ -155,6 +157,27 @@ export interface GeyserStatus extends LoadRow {
   need_kwh: number;
   heated_at: LocalDateTime | null;
   auto: boolean;
+  check: GeyserCheck | null;
+  watch_until: LocalDateTime | null;
+  elements: GeyserElements | null;
+}
+
+export type ElementState = "heating" | "keep_warm" | "off";
+
+export interface GeyserElements {
+  low: ElementState;
+  high: ElementState;
+  unsure: boolean;
+  why: string;
+  at: LocalDateTime | null;
+}
+
+export interface GeyserCheck {
+  action: string;
+  sent_at: LocalDateTime;
+  state: "checking" | "confirmed" | "not_confirmed";
+  checked_at: LocalDateTime | null;
+  note: string;
 }
 
 export type SocBasis = "read" | "live" | "estimated" | "full" | "set";
@@ -257,22 +280,16 @@ export interface ScooterReading {
   state_after: string | null;
 }
 
-export type GeyserButton = "power" | "w800" | "w1200" | "w2000" | "temp_up" | "temp_down";
-
-export interface GeyserLearnResult {
-  button: string;
-  ok: boolean;
-  error: string | null;
-  length: number | null;
-}
+export type GeyserButton = "power" | "800" | "1200" | "up" | "down";
 
 export interface GeyserRemoteStatus {
-  learned: Record<string, boolean>;
-  learning: string | null;
-  last_sent: string | null;
-  uptime_s: number | null;
+  ip: string | null;
   rssi: number | null;
-  last_learn: GeyserLearnResult | null;
+  uptime_s: number | null;
+  last_button: string | null;
+  last_pressed_s_ago: number | null;
+  last_heard: string | null;
+  last_heard_s_ago: number | null;
 }
 
 export interface AutomationLastEvent {

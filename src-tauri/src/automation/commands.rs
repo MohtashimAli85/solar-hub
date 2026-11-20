@@ -6,7 +6,7 @@ use crate::geyser::{Button, GeyserRemote, RemoteStatus};
 use crate::scooter::{ScooterReading, ScooterState};
 use super::history::DecisionRow;
 use super::insights::AutomationInsights;
-use super::loads::{EditState, LoadEdit, LoadKind, LoadPhase, LoadsAnswer};
+use super::loads::{geyser_levels, EditState, GeyserIntent, LoadEdit, LoadKind, LoadPhase, LoadsAnswer};
 use super::{AutomationState, AutomationStatus};
 use crate::notifications::Notifier;
 
@@ -245,15 +245,31 @@ pub async fn get_geyser_remote(state: State<'_, AutomationState>) -> Result<Remo
 }
 
 #[tauri::command]
-pub async fn learn_geyser_button(state: State<'_, AutomationState>, name: String) -> Result<RemoteStatus, String> {
-    let remote = geyser_remote(&state).await?;
-    remote.learn(button(&name)?).await?;
-    remote.status().await
+pub async fn press_geyser_button(state: State<'_, AutomationState>, name: String) -> Result<(), String> {
+    geyser_remote(&state).await?.press(button(&name)?).await
 }
 
+/// On at a level (`watts`) or off (`None`), worked out and checked like the
+/// app's own presses.
 #[tauri::command]
-pub async fn press_geyser_button(state: State<'_, AutomationState>, name: String) -> Result<(), String> {
-    geyser_remote(&state).await?.send(button(&name)?).await
+pub async fn switch_geyser(state: State<'_, AutomationState>, watts: Option<f64>) -> Result<(), String> {
+    let config = state.config().await;
+    if config.dry_run {
+        return Err("Dry run is on, so the app presses nothing".into());
+    }
+    if config.geyser_esp32_host.is_empty() {
+        return Err("Set the ESP32's address in the geyser settings first".into());
+    }
+    let intent = match watts {
+        Some(watts) => {
+            let level = geyser_levels(&config).into_iter().find(|level| (level - watts).abs() < 1.0);
+            GeyserIntent::On(level.ok_or_else(|| format!("{watts:.0} W isn't one of the geyser's levels"))?)
+        }
+        None => GeyserIntent::Off,
+    };
+    *state.geyser_request.lock().await = Some(intent);
+    state.loads_touched();
+    Ok(())
 }
 
 #[tauri::command]

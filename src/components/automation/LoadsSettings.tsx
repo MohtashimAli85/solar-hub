@@ -1,12 +1,11 @@
 import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { getGeyserRemote, learnGeyserButton, pressGeyserButton, readScooterNow } from "@/lib/tauri";
+import { getGeyserRemote, pressGeyserButton, readScooterNow } from "@/lib/tauri";
 import type { AutomationConfig, GeyserButton } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
@@ -149,6 +148,8 @@ type GeyserForm = Pick<
   | "geyser_high_watts"
   | "geyser_daily_kwh"
   | "geyser_tank_litres"
+  | "geyser_winter_only"
+  | "inverter_max_w"
   | "geyser_esp32_host"
   | "geyser_auto_control"
   | "geyser_first_weekdays"
@@ -160,39 +161,32 @@ const GEYSER_RANGES = {
   geyser_high_watts: { min: 100, max: 5_000 },
   geyser_daily_kwh: { min: 0.5, max: 20 },
   geyser_tank_litres: { min: 10, max: 500 },
+  inverter_max_w: { min: 1_000, max: 20_000 },
   geyser_first_below_c: { min: -20, max: 40 },
 } satisfies Record<string, Range>;
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 const REMOTE_BUTTONS: { name: GeyserButton; label: string }[] = [
-  { name: "power", label: "On/Off" },
-  { name: "w800", label: "800 W" },
-  { name: "w1200", label: "1200 W" },
-  { name: "w2000", label: "2000 W" },
-  { name: "temp_up", label: "Temp +" },
-  { name: "temp_down", label: "Temp −" },
+  { name: "800", label: "800 W" },
+  { name: "1200", label: "1200 W" },
+  { name: "up", label: "Temp +" },
+  { name: "down", label: "Temp −" },
 ];
 
 const REMOTE_KEY = ["geyser", "remote"] as const;
 
 function RemotePanel() {
-  const queryClient = useQueryClient();
   const [checking, setChecking] = useState(false);
   const remote = useQuery({
     queryKey: REMOTE_KEY,
     queryFn: getGeyserRemote,
     enabled: checking,
     retry: false,
-    refetchInterval: (query) => (query.state.data?.learning ? 2_000 : false),
-  });
-  const learn = useMutation({
-    mutationFn: learnGeyserButton,
-    onSuccess: (status) => queryClient.setQueryData(REMOTE_KEY, status),
   });
   const press = useMutation({ mutationFn: pressGeyserButton });
   const status = remote.data;
-  const error = remote.error ?? learn.error ?? press.error;
+  const error = remote.error ?? press.error;
 
   if (!checking) {
     return (
@@ -215,43 +209,21 @@ function RemotePanel() {
           Refresh
         </Button>
       </div>
-      {status?.learning ? (
-        <p className="text-sm">
-          Point the geyser's remote at the ESP32 and press <strong>{REMOTE_BUTTONS.find((b) => b.name === status.learning)?.label}</strong>{" "}
-          now (20 seconds).
-        </p>
-      ) : status?.last_learn ? (
-        <p className="text-xs text-muted-foreground">
-          {status.last_learn.ok
-            ? `Learned ${status.last_learn.button}.`
-            : `Learning ${status.last_learn.button} failed: ${status.last_learn.error ?? "no signal"}.`}
-        </p>
-      ) : null}
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-        {REMOTE_BUTTONS.map((button) => {
-          const learned = status?.learned[button.name] ?? false;
-          return (
-            <div key={button.name} className="flex items-center justify-between gap-2 rounded-md border border-border px-2.5 py-2">
-              <span className="inline-flex items-center gap-2 text-sm">
-                {button.label}
-                <Badge variant={learned ? "success" : "secondary"}>{learned ? "Learned" : "Not learned"}</Badge>
-              </span>
-              <span className="flex gap-1">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => learn.mutate(button.name)}
-                  disabled={!status || !!status.learning || learn.isPending}
-                >
-                  Learn
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => press.mutate(button.name)} disabled={!learned || press.isPending}>
-                  Press
-                </Button>
-              </span>
-            </div>
-          );
-        })}
+      <p className="text-xs text-muted-foreground">
+        The geyser stays on; 800 W and 1200 W each toggle one element (both on is 2000 W, both off draws nothing). The app never presses On/Off.
+      </p>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+        {REMOTE_BUTTONS.map((button) => (
+          <Button
+            key={button.name}
+            variant="outline"
+            size="sm"
+            onClick={() => press.mutate(button.name)}
+            disabled={!status || press.isPending}
+          >
+            {button.label}
+          </Button>
+        ))}
       </div>
       {error ? <p className="text-sm text-destructive">{String(error)}</p> : null}
     </div>
@@ -267,6 +239,8 @@ export function GeyserSettings({ config, saving, onSave }: SettingsProps) {
     geyser_high_watts: config.geyser_high_watts,
     geyser_daily_kwh: config.geyser_daily_kwh,
     geyser_tank_litres: config.geyser_tank_litres,
+    geyser_winter_only: config.geyser_winter_only,
+    inverter_max_w: config.inverter_max_w,
     geyser_esp32_host: config.geyser_esp32_host,
     geyser_auto_control: config.geyser_auto_control,
     geyser_first_weekdays: config.geyser_first_weekdays,
@@ -278,6 +252,7 @@ export function GeyserSettings({ config, saving, onSave }: SettingsProps) {
     geyser_high_watts: rangeError(GEYSER_RANGES.geyser_high_watts, form.geyser_high_watts),
     geyser_daily_kwh: rangeError(GEYSER_RANGES.geyser_daily_kwh, form.geyser_daily_kwh),
     geyser_tank_litres: rangeError(GEYSER_RANGES.geyser_tank_litres, form.geyser_tank_litres),
+    inverter_max_w: rangeError(GEYSER_RANGES.inverter_max_w, form.inverter_max_w),
     geyser_first_below_c: rangeError(GEYSER_RANGES.geyser_first_below_c, form.geyser_first_below_c),
   };
   const hoursProblem = form.geyser_end_hour <= form.geyser_start_hour ? "End must be after start" : null;
@@ -304,6 +279,13 @@ export function GeyserSettings({ config, saving, onSave }: SettingsProps) {
         help="Picks the sunniest stretch and the power (800, 1200 or 2000 W) the spare sun can carry, only from sun beyond what fills the battery by sunset, and says when to switch off. Off from sunset."
         checked={form.geyser_enabled}
         onChange={(value) => set("geyser_enabled", value)}
+      />
+      <SwitchRow
+        id="geyser-winter-only"
+        label="Winter only"
+        help="November to February the geyser heats every day: on the sun when there's enough, with the grid topping up when there isn't. The rest of the year the app leaves it alone; switch it on by hand if you want it."
+        checked={form.geyser_winter_only}
+        onChange={(value) => set("geyser_winter_only", value)}
       />
       <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
         <HourField
@@ -395,15 +377,23 @@ export function GeyserSettings({ config, saving, onSave }: SettingsProps) {
         <TextField
           id="geyser-host"
           label="ESP32 address"
-          help="solarhub-geyser.local, or its IP. Leave empty for reminders only."
-          placeholder="solarhub-geyser.local"
+          help="geyser.local, or its IP. Leave empty for reminders only."
+          placeholder="192.168.1.100"
           value={form.geyser_esp32_host}
           onChange={(value) => set("geyser_esp32_host", value)}
+        />
+        <NumberField
+          id="inverter-max"
+          label="Inverter's most output (W)"
+          help="The geyser only gets what's left under 90% of this, and switches off while a big load like the hotplate is on, so the inverter doesn't trip."
+          value={form.inverter_max_w}
+          error={errors.inverter_max_w}
+          onChange={(value) => set("inverter_max_w", value)}
         />
         <SwitchRow
           id="geyser-auto"
           label="Switch the geyser automatically"
-          help="Needs On/Off, 800, 1200 and 2000 W learned. Every press is checked against the house load; if the geyser doesn't respond, it goes back to reminders for the day. Not in dry run."
+          help="Leave the geyser switched on: the app heats at 800, 1200 or 2000 W and stops it by toggling the elements as the plan says, never pressing On/Off, with a notification for every press. Each press is checked against the house load; if the geyser doesn't respond, it goes back to reminders for the day. Not in dry run."
           checked={form.geyser_auto_control && hasHost}
           disabled={!hasHost}
           onChange={(value) => set("geyser_auto_control", value)}
@@ -411,7 +401,7 @@ export function GeyserSettings({ config, saving, onSave }: SettingsProps) {
         {config.geyser_esp32_host ? (
           <RemotePanel />
         ) : (
-          <p className="text-micro text-muted-foreground">Save an address to learn the remote's buttons.</p>
+          <p className="text-micro text-muted-foreground">Save an address to test the remote's buttons.</p>
         )}
       </div>
     </SettingsCard>

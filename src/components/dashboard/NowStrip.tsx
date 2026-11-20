@@ -92,12 +92,12 @@ export function NowStrip({
   const waterRow: LoadRow | null =
     loads.ai.mode === "ai"
       ? loads.water
-      : water?.phase === "ready"
+      : water?.phase === "ready" && loads.water.running_w == null && loads.water.phase !== "done"
         ? { ...loads.water, phase: "ready", note: water.note ?? "Good solar: turn on the motor." }
         : null;
   const rows: [LoadKind, LoadRow | null][] = [
     ["water", waterRow],
-    ["geyser", loads.geyser],
+    ["geyser", loads.geyser.auto ? null : loads.geyser],
     ["hotplate", loads.hotplate],
     ["ev", loads.ev],
   ];
@@ -106,7 +106,7 @@ export function NowStrip({
     if (item) items.push(item);
   }
   const geyser = loads.geyser;
-  if (loads.geyser_required && geyser.running_w == null && geyser.phase === "waiting") {
+  if (!geyser.auto && loads.geyser_required && geyser.running_w == null && geyser.phase === "waiting") {
     const when = geyser.from ? ` Best from ${clock(geyser.from)}${geyser.until ? ` to ${clock(geyser.until)}` : ""}.` : "";
     items.push({
       key: "geyser-today",
@@ -117,11 +117,12 @@ export function NowStrip({
   }
   const ev = loads.ev;
   if (ev.charge_today === true && ev.running_w == null && ev.phase === "waiting") {
+    const why = ev.charge_rule?.replace(/^Charge today: /, "").replace(/\.$/, "");
     const when = ev.from ? ` Best from ${clock(ev.from)}${ev.until ? ` to ${clock(ev.until)}` : ""}.` : "";
     items.push({
       key: "ev-today",
       icon: Bike,
-      text: `Charge the scooter today${ev.charge_rule ? ` — ${ev.charge_rule}` : ""}.${when}`,
+      text: `Charge the scooter today${why ? ` — ${why}` : ""}.${when}`,
       actions: [{ label: "Plugged in", run: () => onEdit(edit("ev", "on")) }],
     });
   }

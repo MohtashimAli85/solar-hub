@@ -62,11 +62,36 @@ export function etaDuration(eta: BatteryEta, sunset: number | null = null): stri
   }
 }
 
+/** The planner's day: when today's forecast sun (after the planned loads) fills the battery, or how full it gets by sunset. */
+export interface SunOutlook {
+  fullBy: string | null;
+  sunsetSoc: number | null;
+}
+
+function byForecast(outlook: SunOutlook | null, now: number): { headline: string; detail: string } | null {
+  if (!outlook) return null;
+  if (outlook.fullBy) {
+    const at = new Date(outlook.fullBy);
+    if (at.getTime() > now) {
+      return { headline: `Full ${clockText(at, now)}`, detail: "on today's sun forecast, after the planned loads" };
+    }
+  }
+  if (outlook.sunsetSoc != null) {
+    return { headline: `About ${Math.round(outlook.sunsetSoc)}% by sunset`, detail: "on today's sun forecast, after the planned loads" };
+  }
+  return null;
+}
+
 export function describeEta(
   eta: BatteryEta,
   now = Date.now(),
   sunset: number | null = null,
+  outlook: SunOutlook | null = null,
 ): { headline: string; detail: string | null } {
+  if (eta.kind === "charging") {
+    const planned = byForecast(outlook, now);
+    if (planned) return planned;
+  }
   switch (eta.kind) {
     case "discharging":
       return {
@@ -76,8 +101,8 @@ export function describeEta(
     case "charging":
       if (!fillsInTime(eta, sunset)) {
         return {
-          headline: sunset != null ? "Won't be full by sunset at this rate" : "Won't be full today at this rate",
-          detail: "charging slowly right now — more sun will speed it up",
+          headline: "Charging slowly for now",
+          detail: "the sun is still low — it speeds up as the day goes on",
         };
       }
       return {

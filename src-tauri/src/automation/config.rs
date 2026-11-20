@@ -1,3 +1,4 @@
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -36,6 +37,10 @@ pub struct AutomationConfig {
     pub geyser_high_watts: f64,
     pub geyser_daily_kwh: f64,
     pub geyser_tank_litres: f64,
+    /// The geyser is planned only November to February, then every day, sun or grid.
+    pub geyser_winter_only: bool,
+    /// The most the inverter can supply; the app keeps the geyser well under it.
+    pub inverter_max_w: f64,
     pub geyser_start_hour: u32,
     pub geyser_end_hour: u32,
     /// The ESP32 IR blaster's host name or IP; empty means reminders only.
@@ -68,6 +73,12 @@ pub struct AutomationConfig {
     pub ev_remind_minutes: u32,
 }
 
+impl AutomationConfig {
+    pub fn geyser_planned_on(&self, date: NaiveDate) -> bool {
+        self.geyser_enabled && (!self.geyser_winter_only || matches!(date.month(), 11 | 12 | 1 | 2))
+    }
+}
+
 impl Default for AutomationConfig {
     fn default() -> Self {
         Self {
@@ -98,6 +109,8 @@ impl Default for AutomationConfig {
             geyser_high_watts: 1200.0,
             geyser_daily_kwh: 3.0,
             geyser_tank_litres: 50.0,
+            geyser_winter_only: true,
+            inverter_max_w: 3600.0,
             geyser_start_hour: 10,
             geyser_end_hour: 16,
             geyser_esp32_host: String::new(),
@@ -149,6 +162,7 @@ impl AutomationConfig {
         self.geyser_high_watts = self.geyser_high_watts.clamp(100.0, 5_000.0);
         self.geyser_daily_kwh = self.geyser_daily_kwh.clamp(0.5, 20.0);
         self.geyser_tank_litres = self.geyser_tank_litres.clamp(10.0, 500.0);
+        self.inverter_max_w = self.inverter_max_w.clamp(1000.0, 20_000.0);
         self.geyser_start_hour = self.geyser_start_hour.clamp(6, 17);
         self.geyser_end_hour = self.geyser_end_hour.clamp(self.geyser_start_hour + 1, 18);
         self.geyser_esp32_host = self.geyser_esp32_host.trim().to_string();

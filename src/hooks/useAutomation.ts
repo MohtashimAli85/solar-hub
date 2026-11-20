@@ -12,6 +12,7 @@ import {
   getAutomationInsights,
   getAutomationStatus,
   markGeyserDone,
+  switchGeyser,
   markWaterDone,
   openRecordsFolder,
   readScooterNow,
@@ -120,6 +121,10 @@ export function useAutomation({ withInsights = false, decisionLimit = 0 } = {}) 
     mutationFn: markGeyserDone,
     onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
   });
+  const geyserSwitch = useMutation({
+    mutationFn: switchGeyser,
+    onSettled: () => queryClient.invalidateQueries({ queryKey: STATUS_KEY }),
+  });
   const scooterSkip = useMutation({
     mutationFn: skipScooterToday,
     onSuccess: (status) => queryClient.setQueryData(STATUS_KEY, status),
@@ -160,6 +165,7 @@ export function useAutomation({ withInsights = false, decisionLimit = 0 } = {}) 
     openFolder,
     waterDone,
     geyserDone,
+    geyserSwitch,
     scooterRead,
     scooterSkip,
     questionAnswer,

@@ -108,7 +108,7 @@ impl SolarClient {
     }
 
     pub fn is_configured(&self) -> bool {
-        !self.credentials.try_lock().map(|c| c.user_id.is_empty() || c.password.is_empty()).unwrap_or(true)
+        self.credentials.try_lock().map_or(true, |c| !c.user_id.is_empty() && !c.password.is_empty())
     }
 
     /// Local time in the configured IANA time zone, formatted the way the Node

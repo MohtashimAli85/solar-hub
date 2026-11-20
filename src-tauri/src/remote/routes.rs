@@ -176,8 +176,8 @@ async fn dispatch(app: &AppHandle, command: &str, args: &Value) -> Result<Option
         "skip_hotplate_today" => to_json(auto::skip_hotplate_today(app.clone(), app.state()).await),
         "read_scooter_now" => to_json(auto::read_scooter_now(app.state(), app.state(), arg(args, "powerCycle")?).await),
         "get_geyser_remote" => to_json(auto::get_geyser_remote(app.state()).await),
-        "learn_geyser_button" => to_json(auto::learn_geyser_button(app.state(), arg(args, "name")?).await),
         "press_geyser_button" => to_json(auto::press_geyser_button(app.state(), arg(args, "name")?).await),
+        "switch_geyser" => to_json(auto::switch_geyser(app.state(), arg(args, "watts")?).await),
 
         "get_energy_summary" => to_json(en::get_energy_summary(app.state()).await),
         "set_bill_reading" => to_json(en::set_bill_reading(app.clone(), app.state(), arg(args, "day")?, arg(args, "time")?).await),

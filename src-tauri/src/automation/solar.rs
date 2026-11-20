@@ -26,6 +26,10 @@ const SURELY_NOT_FULL_SOC: f64 = 90.0;
 const STEP_MINUTES: i64 = 15;
 const HELD_BACK_SOC: f64 = 95.0;
 const NOT_FULL_VOLTS: f64 = 26.4;
+/// Charging at this share of the highest current seen is the inverter's
+/// limit, which holds the panels back too.
+const CHARGE_CAP_SHARE: f64 = 0.9;
+const CHARGE_CAP_MIN_A: f64 = 20.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PvPoint {
@@ -76,10 +80,12 @@ impl PvShape {
     ) -> Self {
         let mut per_slot: Vec<Vec<f64>> = vec![Vec::new(); SLOTS];
         let mut max_w: Option<f64> = None;
+        let cap = samples.iter().filter(|s| s.at >= since).filter_map(|s| s.battery_a).fold(0.0, f64::max);
+        let capped = |s: &Sample| cap >= CHARGE_CAP_MIN_A && s.battery_a.is_some_and(|amps| amps >= cap * CHARGE_CAP_SHARE);
         for sample in samples.iter().filter(|s| s.at >= since) {
             let Some(pv) = sample.pv_w else { continue };
             max_w = Some(max_w.map_or(pv, |max| max.max(pv)));
-            if !free_running(sample) || pv_array_watts <= 0.0 {
+            if !free_running(sample) || capped(sample) || pv_array_watts <= 0.0 {
                 continue;
             }
             let Some(radiation) = forecast.radiation_at(sample.at).filter(|r| *r >= MIN_RADIATION) else { continue };
@@ -126,12 +132,14 @@ pub fn live_factor(shape: &PvShape, forecast: &Forecast, pv_array_watts: f64, sa
     let since = now - Duration::minutes(LIVE_WINDOW_MINUTES);
     let window: Vec<&Sample> = samples.iter().filter(|s| s.at > since && s.at <= now).collect();
     let not_full = window.iter().rev().find_map(|s| s.soc).is_some_and(|soc| soc < SURELY_NOT_FULL_SOC);
+    let cap = samples.iter().filter_map(|s| s.battery_a).fold(0.0, f64::max);
+    let capped = |s: &Sample| cap >= CHARGE_CAP_MIN_A && s.battery_a.is_some_and(|amps| amps >= cap * CHARGE_CAP_SHARE);
     let ratios: Vec<f64> = window
         .iter()
         .filter_map(|s| {
             let pv = s.pv_w?;
             let expected = shape.watts(forecast, pv_array_watts, s.at).filter(|w| *w >= LIVE_MIN_EXPECTED_W)?;
-            let free = if s.soc.is_some() { free_running(s) } else { not_full || free_running(s) };
+            let free = !capped(s) && if s.soc.is_some() { free_running(s) } else { not_full || free_running(s) };
             (free || pv > expected).then_some(pv / expected)
         })
         .collect();

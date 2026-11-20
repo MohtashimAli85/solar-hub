@@ -128,9 +128,8 @@ export const readScooterNow = (powerCycle: boolean) => invoke<ScooterReading>("r
 
 export const getGeyserRemote = () => invoke<GeyserRemoteStatus>("get_geyser_remote");
 
-export const learnGeyserButton = (name: GeyserButton) => invoke<GeyserRemoteStatus>("learn_geyser_button", { name });
-
 export const pressGeyserButton = (name: GeyserButton) => invoke<void>("press_geyser_button", { name });
+export const switchGeyser = (watts: number | null) => invoke<void>("switch_geyser", { watts });
 export const getEnergySummary = () => invoke<EnergySummary>("get_energy_summary");
 
 export const setBillReading = (day: number, time: string) =>

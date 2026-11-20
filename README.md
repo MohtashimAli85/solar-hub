@@ -377,14 +377,36 @@ forecast never goes above the panels' best reading. The last hour's readings
 sky is really doing. A dashed line marks 100 W, and the line above the chart
 says when the panels give 100 W or more and when they peak.
 
-**Geyser over the ESP32.** `esp32/geyser-ir/` is the firmware for an ESP32
-that learns the geyser's IR remote and presses its buttons when the app asks
-(parts, wiring and flashing are in its README). Learn On/Off, 800, 1200 and
-2000 W from the geyser settings, then turn on **Switch the geyser
-automatically**. Every press is checked against the house load a few minutes
-later. If the geyser doesn't start (it may already be hot) or doesn't stop,
-the app says so and goes back to reminders for the day. It never presses
-anything in dry run.
+**Geyser over the ESP32.** An ESP32 next to the geyser sends its IR remote
+codes: `POST /press?button=power|800|1200|up|down` and `GET /status`. The
+geyser is left switched on and the app never presses On/Off: 800 and 1200
+each toggle one element (both is 2000 W, both off draws nothing), and the
+geyser keeps its elements through a power cut. Put the ESP32's address in
+the geyser settings and turn on **Switch the geyser automatically**. The app
+works every press out from what the inverter sees drawing, not from memory:
+with nothing drawing it presses the elements for the level, while it draws it
+toggles to the new level or switches the drawing elements off. Every press
+sends a notification and is checked on a reading taken after it; the geyser
+row shows the last action as checking, confirmed or not confirmed. A
+switch-on that still draws nothing (the water may already be hot) is not
+repeated; the app says so and goes back to reminders for the day, though a
+geyser seen drawing when it should be off still has its elements switched
+off. When the thermostat cuts it out after a real heat-up, the app switches
+the selected elements off so it doesn't heat again on its own. A geyser that
+stops after only a little energy is taken as switched off by hand, not hot.
+It never presses anything in dry run.
+
+**Switching the geyser from the app.** The geyser row's ⋯ menu has **Switch
+on at 800 / 1200 / 2000 W** and **Switch off** (also on the phone). They are
+worked out from the load and checked like the app's own presses, even with
+automatic control off; Switch off presses nothing unless the geyser is
+drawing. By day, every geyser run is watched for its first 10 minutes before
+the plan may change it: the app then sums up the sun, the house load, whether
+the battery charged or drained and the battery %, asks the AI again with those
+readings, and sends the result ("Decision: keep it on", "turn it down to
+800 W" or "switch it off"; "Suggestion" when automatic control is off). At
+night a geyser switched on from the app stays on until it stops drawing or
+you switch it off.
 
 **Buttons.** On the dashboard: **Done** for the tank, **Hot enough** for the
 geyser, **Yes, cooking** / **No**, **Done cooking** and **Not today** for the
@@ -558,7 +580,7 @@ src-tauri/src/          Rust backend
   scooter/              Yadea scooter over Bluetooth: pairing and reading its %
   geyser/               client for the ESP32 that presses the geyser's remote
   notifications.rs      alert rules and macOS notifications
-esp32/geyser-ir/        ESP32 firmware (PlatformIO) for the geyser's IR remote
+esp32/geyser-remote/    ESP32 firmware (Arduino) for the geyser's IR remote
 agent/                  Node scripts that call the AI models: night.js, day.js,
                         loads.js (the solar loads), sun.js, and system.js (the one shared system prompt: modes,
                         smart load, household rules, goals)

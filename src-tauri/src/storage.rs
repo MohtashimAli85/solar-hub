@@ -146,6 +146,23 @@ pub fn save_day(app: &AppHandle, key: &str, date: Option<chrono::NaiveDate>) -> 
     store.save().map_err(|error| error.to_string())
 }
 
+const SAVED_LOADS_KEY: &str = "loads_saved";
+
+pub fn load_saved_loads(app: &AppHandle) -> Option<crate::automation::loads::SavedLoads> {
+    app.store(AUTOMATION_STORE)
+        .ok()
+        .and_then(|store| store.get(SAVED_LOADS_KEY))
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+pub fn save_saved_loads(app: &AppHandle, saved: &crate::automation::loads::SavedLoads) -> Result<(), String> {
+    let store = app
+        .store(AUTOMATION_STORE)
+        .map_err(|error| error.to_string())?;
+    store.set(SAVED_LOADS_KEY, json!(saved));
+    store.save().map_err(|error| error.to_string())
+}
+
 fn load_done_on(app: &AppHandle, key: &str) -> Option<chrono::NaiveDate> {
     app.store(AUTOMATION_STORE)
         .ok()

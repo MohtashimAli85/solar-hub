@@ -13,6 +13,8 @@ use crate::inverter::InverterError;
 use crate::notifications::Notifier;
 
 const REFRESH_EVERY: Duration = Duration::from_secs(10 * 60);
+/// The login can come in a moment after start (the Keychain may ask first).
+const UNCONFIGURED_RETRY: Duration = Duration::from_secs(30);
 const BACKFILL_PAUSE: Duration = Duration::from_secs(1);
 const BACKFILL_EMIT_EVERY: usize = 5;
 /// Give the logger a few minutes past midnight before a day counts as finished.
@@ -25,8 +27,9 @@ pub fn spawn(state: EnergyState, client: SolarClient, app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             refresh(&state, &client, &app).await;
+            let wait = if client.is_configured() { REFRESH_EVERY } else { UNCONFIGURED_RETRY };
             tokio::select! {
-                _ = tokio::time::sleep(REFRESH_EVERY) => {}
+                _ = tokio::time::sleep(wait) => {}
                 _ = state.wake.notified() => {}
             }
         }

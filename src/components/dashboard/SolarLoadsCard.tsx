@@ -7,6 +7,9 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSepa
 import type {
   AutomationConfig,
   EditState,
+  ElementState,
+  GeyserCheck,
+  GeyserElements,
   LoadEdit,
   LoadKind,
   LoadPhase,
@@ -53,7 +56,7 @@ const SOC_BASIS: Record<SocBasis, string> = {
   set: "set by you",
 };
 
-const HOTPLATE_LEVELS = [500, 1000, 1500, 2000];
+const HOTPLATE_LEVELS = [200, 400, 800, 1000, 1200, 1400, 1600, 1800, 2000];
 
 interface MenuOption {
   value: string;
@@ -76,7 +79,7 @@ function stateOptions(kind: LoadKind, geyserLevels: number[]): MenuOption[] {
       ];
     case "hotplate":
       return [
-        ...HOTPLATE_LEVELS.map((watts) => ({ value: `on:${watts}`, label: `On at about ${watts} W` })),
+        ...HOTPLATE_LEVELS.map((watts) => ({ value: `on:${watts}`, label: `On at ${watts} W` })),
         { value: "done", label: "Cooked today" },
         { value: "off", label: "Not cooked today" },
       ];
@@ -173,7 +176,9 @@ interface LoadItem {
   name: string;
   badge: BadgeSpec;
   line: string;
+  status?: string;
   meter?: Meter;
+  lights?: { elements: GeyserElements; levels: [number, number] };
   primary?: Primary;
   extras: Extra[];
 }
@@ -197,6 +202,50 @@ function MeterBar({ meter }: { meter: Meter }) {
         ) : null}
       </div>
       <span className="truncate text-xs text-muted-foreground tabular-nums">{meter.label}</span>
+    </div>
+  );
+}
+
+const ELEMENT_STATES: Record<ElementState, string> = {
+  heating: "heating",
+  keep_warm: "on, thermostat cut out (blinking)",
+  off: "off",
+};
+
+/** The two element switches as the app believes they are, like the panel's own lights. */
+function ElementLights({ elements, levels }: { elements: GeyserElements; levels: [number, number] }) {
+  const lights: [number, ElementState][] = [
+    [levels[0], elements.low],
+    [levels[1], elements.high],
+  ];
+  const when = elements.at ? ` at ${clock(elements.at)}` : "";
+  const summary = lights.map(([watts, state]) => `${watts} W ${ELEMENT_STATES[state]}`).join(", ");
+  return (
+    <div
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+      role="img"
+      aria-label={`Elements: ${summary}${elements.unsure ? ", not sure" : ""}. From ${elements.why}${when}.`}
+    >
+      {lights.map(([watts, state]) => (
+        <span key={watts} className="inline-flex items-center gap-1.5 tabular-nums">
+          <span
+            className={
+              state === "off"
+                ? "size-2.5 rounded-full border border-border bg-muted"
+                : state === "heating"
+                  ? "size-2.5 rounded-full bg-primary"
+                  : "size-2.5 animate-pulse rounded-full bg-primary motion-reduce:animate-none"
+            }
+            aria-hidden
+          />
+          {watts}
+        </span>
+      ))}
+      <span className="truncate">
+        {elements.unsure ? "Not sure: " : ""}
+        {elements.why}
+        {elements.unsure ? "" : when}
+      </span>
     </div>
   );
 }
@@ -254,6 +303,17 @@ function MoreMenu({
   );
 }
 
+const CHECK_STATES: Record<GeyserCheck["state"], string> = {
+  checking: "checking the load…",
+  confirmed: "confirmed",
+  not_confirmed: "not confirmed",
+};
+
+function checkText(check: GeyserCheck) {
+  const when = check.checked_at && check.state !== "checking" ? ` ${clock(check.checked_at)}` : "";
+  return `ESP32: ${check.action} at ${clock(check.sent_at)} · ${CHECK_STATES[check.state]}${when}. ${check.note}`;
+}
+
 function LoadRowView({ item, menu }: { item: LoadItem; menu: ReactNode }) {
   const Icon = item.icon;
   const Action = item.primary?.icon;
@@ -273,7 +333,9 @@ function LoadRowView({ item, menu }: { item: LoadItem; menu: ReactNode }) {
         <p className="truncate text-sm" title={item.line}>
           {item.line}
         </p>
+        {item.status ? <p className="text-xs text-muted-foreground">{item.status}</p> : null}
         {item.meter ? <MeterBar meter={item.meter} /> : null}
+        {item.lights ? <ElementLights elements={item.lights.elements} levels={item.lights.levels} /> : null}
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-1.5">
         {item.primary && Action ? (
@@ -359,6 +421,8 @@ interface SolarLoadsCardProps {
   geyserLevels: number[];
   onWaterDone: () => void;
   onGeyserDone: () => void;
+  onSwitchGeyser: (watts: number | null) => void;
+  switchError: string | null;
   onReadScooter: () => void;
   onSkipScooter: () => void;
   onEdit: (edit: LoadEdit) => void;
@@ -379,6 +443,8 @@ export function SolarLoadsCard({
   geyserLevels,
   onWaterDone,
   onGeyserDone,
+  onSwitchGeyser,
+  switchError,
   onReadScooter,
   onSkipScooter,
   onEdit,
@@ -424,12 +490,14 @@ export function SolarLoadsCard({
   };
 
   const geyser = loads.geyser;
+  const canSwitch = Boolean(config?.geyser_esp32_host) && !config?.dry_run;
   const geyserItem: LoadItem = {
     kind: "geyser",
     icon: Flame,
     name: geyser.auto ? "Geyser · ESP32" : "Geyser",
     badge: LOAD_PHASES[geyser.phase],
     line: geyser.note ?? "–",
+    status: switchError ?? (geyser.check ? checkText(geyser.check) : undefined),
     meter:
       geyser.phase === "off"
         ? undefined
@@ -439,11 +507,23 @@ export function SolarLoadsCard({
             max: geyser.need_kwh,
             label: `${geyser.delivered_kwh.toFixed(1)} / ${geyser.need_kwh.toFixed(1)} kWh${loads.geyser_first ? " · before the hotplate today" : ""}`,
           },
+    lights:
+      geyser.elements && config
+        ? { elements: geyser.elements, levels: [config.geyser_low_watts, config.geyser_high_watts] }
+        : undefined,
     primary:
       geyser.phase !== "off" && geyser.phase !== "done"
         ? { label: "Hot enough", icon: Check, run: onGeyserDone, busy: geyserPending }
         : undefined,
-    extras: [{ value: "x:heat-time", label: "Heating time…", run: () => setHeatTimeOpen(true) }],
+    extras: [
+      ...(canSwitch
+        ? [
+            ...geyserLevels.map((watts) => ({ value: `x:on-${watts}`, label: `Switch on at ${watts} W`, run: () => onSwitchGeyser(watts) })),
+            { value: "x:off", label: "Switch off", run: () => onSwitchGeyser(null) },
+          ]
+        : []),
+      { value: "x:heat-time", label: "Heating time…", run: () => setHeatTimeOpen(true) },
+    ],
   };
 
   const hotplate = loads.hotplate;

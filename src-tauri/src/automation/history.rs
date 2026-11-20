@@ -16,7 +16,10 @@ const LEGACY_DECISION_HEADER: &str = "timestamp,window,mode,reserve_soc,recheck_
 const NIGHT_HOURS: [u32; 15] = [17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7];
 const DAY_HOURS: [u32; 14] = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 const MIN_HOURS_FOR_A_NIGHT: usize = 3;
-const BASE_PERCENTILE: f64 = 0.25;
+const BASE_PERCENTILE: f64 = 0.1;
+/// No hour's house load is taken as more than this many times the typical
+/// hour's: around midday a flexible load is on in almost every reading.
+const BASE_SPREAD: f64 = 2.0;
 const BASE_MIN_SAMPLES: usize = 6;
 const FULL_SOC: f64 = 95.0;
 const OUTAGE_GAP_MINUTES: i64 = 60;
@@ -101,6 +104,16 @@ impl HistoryStore {
             }
         }
         self.append("decisions", DECISION_HEADER, row.at.date(), &decision_to_csv(row))
+    }
+
+    /// One JSON line per reading or action in loads/<day>.jsonl, for looking back at what the app did and why.
+    pub fn append_loads_log(&self, at: NaiveDateTime, line: &serde_json::Value) -> std::io::Result<()> {
+        let path = self.root.join("loads").join(format!("{}.jsonl", at.date().format("%Y-%m-%d")));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        writeln!(file, "{line}")
     }
 
     pub(crate) fn read_lines(&self, kind: &str, date: NaiveDate) -> Vec<String> {
@@ -395,8 +408,20 @@ pub fn day_profile(samples: &[Sample], today: NaiveDate, days: i64) -> Vec<HourL
 
 /// The house's own load by hour: a low percentile of the readings, so the
 /// geyser, motor, hotplate and charger, which run only part of the time,
-/// don't count as the house.
+/// don't count as the house, held near the typical hour's for the hours
+/// when one of them is nearly always on.
 pub fn day_base_profile(samples: &[Sample], today: NaiveDate, days: i64) -> Vec<HourLoad> {
+    let mut hours = day_low_loads(samples, today, days);
+    let mut lows: Vec<f64> = hours.iter().map(|h| h.load_w).collect();
+    if let Some(typical) = median(&mut lows) {
+        for hour in &mut hours {
+            hour.load_w = hour.load_w.min(typical * BASE_SPREAD);
+        }
+    }
+    hours
+}
+
+fn day_low_loads(samples: &[Sample], today: NaiveDate, days: i64) -> Vec<HourLoad> {
     let since = today - Duration::days(days);
     DAY_HOURS
         .iter()
@@ -829,4 +854,33 @@ mod tests {
         assert!((night.evening_draw_a.unwrap() - 15.0).abs() < 1e-9);
         assert!((night.sleep_draw_a.unwrap() - 4.1).abs() < 1e-9);
     }
+    #[test]
+    fn the_house_base_ignores_hours_when_a_load_is_nearly_always_on() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        let mut samples = Vec::new();
+        for offset in 0..7 {
+            for hour in [9, 10, 11, 12, 13, 14] {
+                for minute in [0, 10, 20, 30, 40, 50] {
+                    let load = if hour == 12 { 1500.0 } else { 150.0 + f64::from(minute) };
+                    samples.push(Sample {
+                        at: (day + Duration::days(offset)).and_hms_opt(hour, minute, 0).unwrap(),
+                        soc: Some(90.0),
+                        load_w: Some(load),
+                        pv_w: Some(2000.0),
+                        battery_a: Some(0.0),
+                        battery_v: Some(27.0),
+                        grid_on: Some(false),
+                        grid_basis: String::new(),
+                        mode: Some("SBG".into()),
+                        source: String::new(),
+                    });
+                }
+            }
+        }
+        let base = day_base_profile(&samples, day + Duration::days(7), 7);
+        let at = |hour: u32| base.iter().find(|h| h.hour == hour).unwrap().load_w;
+        assert!(at(10) < 200.0, "{}", at(10));
+        assert!(at(12) <= 2.0 * at(10) + 1.0, "noon held near the rest: {}", at(12));
+    }
+
 }

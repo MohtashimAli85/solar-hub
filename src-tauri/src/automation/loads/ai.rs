@@ -133,6 +133,7 @@ pub struct Checker {
     water_run: Duration,
     /// What the app's own plan takes from the grid for the required loads.
     app_grid_wh: Option<f64>,
+    geyser_off: bool,
 }
 
 pub(super) fn load_name(kind: LoadKind) -> &'static str {
@@ -298,6 +299,12 @@ impl Checker {
                 .unwrap_or(self.now);
             running.push((kind, item.watts, since));
         }
+        if self.geyser_off && running.iter().any(|(kind, _, _)| *kind == LoadKind::Geyser) {
+            problems.push(
+                "The geyser's elements are off and no button has been pressed or heard since, so it can't be on; leave it out of running."
+                    .to_string(),
+            );
+        }
         for (kind, on) in &self.pins {
             let listed = running.iter().any(|(listed, _, _)| listed == kind);
             if *on && !listed {
@@ -453,6 +460,8 @@ pub(super) struct Facts<'a> {
     pub ev_rule: Option<&'a EvToday>,
     pub geyser_required: Option<&'a str>,
     pub app_grid_wh: Option<f64>,
+    /// The ESP32 left the geyser's elements off and nothing was pressed or heard since.
+    pub geyser_off: bool,
 }
 
 pub(super) fn checker(facts: &Facts) -> Checker {
@@ -476,6 +485,8 @@ pub(super) fn checker(facts: &Facts) -> Checker {
     let (from, until) = window(config.geyser_start_hour, config.geyser_end_hour);
     let geyser_allowed = if !config.geyser_enabled {
         Err("geyser planning is off".to_string())
+    } else if !config.geyser_planned_on(today) {
+        Err("outside winter the app leaves the geyser alone".to_string())
     } else if facts.geyser_done || facts.memory.geyser_heated_at.is_some() {
         Err("the water is already hot today".to_string())
     } else {
@@ -557,6 +568,7 @@ pub(super) fn checker(facts: &Facts) -> Checker {
             .collect(),
         water_run: Duration::minutes(config.water_run_minutes as i64),
         app_grid_wh: facts.app_grid_wh,
+        geyser_off: facts.geyser_off,
     }
 }
 
@@ -630,24 +642,51 @@ pub(super) fn ai_input(facts: &Facts) -> LoadsAiInput {
 
     let geyser = if !config.geyser_enabled {
         "Planning is off; leave it out.".to_string()
+    } else if !config.geyser_planned_on(today) {
+        "Not planned outside winter; leave it out.".to_string()
     } else {
         let state = match (facts.geyser_done, memory.geyser_heated_at) {
             (_, Some(at)) => format!(" Its thermostat cut it out at {} — the water is hot.", hhmm(at)),
             (true, None) => " The family marked the water hot enough today.".to_string(),
             _ => String::new(),
         };
+        let watched = match memory.geyser.watch.as_ref() {
+            Some(watch) => match (watch.ended_at, watch.summary.as_deref()) {
+                (Some(_), Some(readings)) => format!(
+                    " It came on at {} and the app watched it for {} minutes at {:.0} W: {readings}. Decide from those readings whether it stays at this level, goes down a level, or goes off.",
+                    hhmm(watch.started_at),
+                    (watch.until - watch.started_at).num_minutes(),
+                    watch.watts
+                ),
+                (Some(_), None) => String::new(),
+                (None, _) => format!(" It just came on at {}; the app watches it until {} before changing anything, so keep it on until then.", hhmm(watch.started_at), hhmm(watch.until)),
+            },
+            None => String::new(),
+        };
+        let draining = match memory.geyser.drain_since {
+            Some(since) => format!(
+                " The live battery reading shows it draining {:.0} W since {} with the geyser on: turn the geyser down to the level the sun carries, or off, unless the battery can lend that and still be full by sunset. The app turns it down itself in a few minutes if the plan doesn't.",
+                memory.geyser.drain_w,
+                hhmm(since)
+            ),
+            None => String::new(),
+        };
         let required = match facts.geyser_required.filter(|_| state.is_empty()) {
             Some(why) => format!(" Required today ({why}): give it its full run even if the sun can't carry it; the grid tops up the rest."),
             None => String::new(),
         };
         format!(
-            "Storage water heater with two elements: runs at exactly {} W ({:.0} = both). Wants about {:.1} kWh a day; {:.1} kWh delivered so far today. Between {}, never after sunset. Its thermostat cuts it out when the water is hot.{state}{required}{}",
+            "Storage water heater with two elements: runs at exactly {} W ({:.0} = both). Wants about {:.1} kWh a day; {:.1} kWh delivered so far today. Between {}, never after sunset. Its thermostat cuts it out when the water is hot. With the battery full the app itself runs it at the biggest level the sun allows and steps it down if the battery drains, so plan it at the level the sun can carry.{state}{watched}{draining}{required}{}",
             geyser_levels(config).iter().rev().map(|w| format!("{w:.0}")).collect::<Vec<_>>().join(", "),
             config.geyser_low_watts + config.geyser_high_watts,
             config.geyser_daily_kwh,
             memory.geyser_delivered_wh / 1000.0,
             window(config.geyser_start_hour, config.geyser_end_hour),
-            belief(LoadKind::Geyser, facts.geyser_running, "")
+            if facts.geyser_off {
+                " Its elements are off and no button has been pressed or heard since: it is not running, so any load you can't place is something else.".to_string()
+            } else {
+                belief(LoadKind::Geyser, facts.geyser_running, "")
+            }
         )
     };
 
@@ -665,7 +704,8 @@ pub(super) fn ai_input(facts: &Facts) -> LoadsAiInput {
             "Today isn't a cooking day, but if the readings show it on, it is on."
         };
         format!(
-            "Electric cooker: any level 100–2200 W, usually about {:.0} W for {:.1} h, between {}, every {} days (last cooked: {last}). {today_text} With too little sun they cook on gas instead.{}",
+            "Electric cooker: its panel sets {} W (the load shows a little more or less), usually about {:.0} W for {:.1} h, between {}, every {} days (last cooked: {last}). {today_text} With too little sun they cook on gas instead.{}",
+            super::HOTPLATE_SETTINGS.iter().rev().map(|w| format!("{w:.0}")).collect::<Vec<_>>().join(", "),
             config.hotplate_watts,
             config.hotplate_hours,
             window(config.hotplate_start_hour, config.hotplate_end_hour),
@@ -1000,6 +1040,11 @@ impl LoadsMemory {
             self.ai.question = None;
         }
         self.ai.next_at = Some(now);
+    }
+
+    /// The family said this load is on, a short while ago.
+    pub(super) fn pinned_on(&self, kind: LoadKind, now: NaiveDateTime, load_w: Option<f64>) -> bool {
+        self.ai.pins.iter().rev().find(|pin| pin.kind == kind && pin.holds(now, load_w)).is_some_and(|pin| pin.on)
     }
 
     /// The family's yes or no to the AI's question goes into what it's told

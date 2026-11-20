@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { GridStatusPill } from "@/components/inverter/GridStatusPill";
 import { PvBreakdown } from "@/components/inverter/PvBreakdown";
 import { Skeleton } from "@/components/ui/switch";
-import { batteryEta, describeEta, EMPTY_TARGET_PERCENT } from "@/lib/batteryEta";
+import { batteryEta, describeEta, EMPTY_TARGET_PERCENT, type SunOutlook } from "@/lib/batteryEta";
 import { chargeState } from "@/lib/batteryStatus";
 import { fieldPowerWatts, fieldValue, flowPowerWatts, fmtDuration, fmtNumber } from "@/lib/format";
 import type { BatterySnapshot, ConnectionStatus, InverterSnapshot } from "@/lib/types";
@@ -14,6 +14,7 @@ interface CommandHeroProps {
   inverter: InverterSnapshot | null;
   inverterUpdatedAt: number | null;
   sunset: string | null;
+  outlook: SunOutlook | null;
   batteryLoading: boolean;
   inverterLoading: boolean;
 }
@@ -40,7 +41,7 @@ function ageText(updatedAt: number | null, now: number): string | null {
   return `updated ${fmtDuration(seconds / 60)} ago`;
 }
 
-export function CommandHero({ battery, connection, inverter, inverterUpdatedAt, sunset, batteryLoading, inverterLoading }: CommandHeroProps) {
+export function CommandHero({ battery, connection, inverter, inverterUpdatedAt, sunset, outlook, batteryLoading, inverterLoading }: CommandHeroProps) {
   const now = useNow(10_000);
   const fields = inverter?.fields ?? {};
   const bmsOk = connection?.connected ?? battery != null;
@@ -60,7 +61,7 @@ export function CommandHero({ battery, connection, inverter, inverterUpdatedAt, 
 
       <div className="grid grid-cols-1 sm:grid-cols-2 sm:divide-x lg:grid-cols-4">
         <BatteryColumn battery={battery} loading={batteryLoading} />
-        <RateColumn battery={battery} loading={batteryLoading} now={now} sunset={sunset} />
+        <RateColumn battery={battery} loading={batteryLoading} now={now} sunset={sunset} outlook={outlook} />
         <SolarColumn inverter={inverter} loading={inverterLoading} fields={fields} />
         <HouseColumn inverter={inverter} loading={inverterLoading} fields={fields} />
       </div>
@@ -125,7 +126,19 @@ function BatteryColumn({ battery, loading }: { battery: BatterySnapshot | null; 
   );
 }
 
-function RateColumn({ battery, loading, now, sunset }: { battery: BatterySnapshot | null; loading: boolean; now: number; sunset: string | null }) {
+function RateColumn({
+  battery,
+  loading,
+  now,
+  sunset,
+  outlook,
+}: {
+  battery: BatterySnapshot | null;
+  loading: boolean;
+  now: number;
+  sunset: string | null;
+  outlook: SunOutlook | null;
+}) {
   if (loading) {
     return (
       <Column label="Charge / discharge">
@@ -143,7 +156,7 @@ function RateColumn({ battery, loading, now, sunset }: { battery: BatterySnapsho
   const state = chargeState(battery.current);
   const watts = battery.voltage * battery.current;
   const sunsetMs = sunset ? new Date(sunset).getTime() : NaN;
-  const eta = describeEta(batteryEta(battery, now), now, Number.isFinite(sunsetMs) && sunsetMs > now ? sunsetMs : null);
+  const eta = describeEta(batteryEta(battery, now), now, Number.isFinite(sunsetMs) && sunsetMs > now ? sunsetMs : null, outlook);
   const moving = state === "charging" || state === "discharging";
   const power = wattsParts(watts);
   const amps = `${fmtNumber(Math.abs(battery.current), 1)} A`;
