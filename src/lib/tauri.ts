@@ -130,6 +130,7 @@ export const getGeyserRemote = () => invoke<GeyserRemoteStatus>("get_geyser_remo
 
 export const pressGeyserButton = (name: GeyserButton) => invoke<void>("press_geyser_button", { name });
 export const switchGeyser = (watts: number | null) => invoke<void>("switch_geyser", { watts });
+export const toggleGeyserElement = (name: "800" | "1200") => invoke<void>("toggle_geyser_element", { name });
 export const getEnergySummary = () => invoke<EnergySummary>("get_energy_summary");
 
 export const setBillReading = (day: number, time: string) =>

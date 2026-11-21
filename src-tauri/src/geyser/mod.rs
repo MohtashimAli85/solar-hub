@@ -62,6 +62,13 @@ pub struct RemoteStatus {
     pub last_heard_s_ago: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PressOutcome {
+    Pressed,
+    Unsure(String),
+    Failed(String),
+}
+
 #[derive(Deserialize)]
 struct Reply {
     error: Option<String>,
@@ -92,15 +99,26 @@ impl GeyserRemote {
     }
 
     pub async fn press(&self, button: Button) -> Result<(), String> {
-        let response = self
-            .http
-            .post(press_url(&self.base, button))
-            .send()
-            .await
-            .map_err(|error| self.unreachable(&error))?;
+        match self.try_press(button).await {
+            PressOutcome::Pressed => Ok(()),
+            PressOutcome::Unsure(error) | PressOutcome::Failed(error) => Err(error),
+        }
+    }
+
+    /// A press whose request reached the ESP32 but timed out waiting for the
+    /// reply may still have gone out: the firmware answers after sending the IR.
+    pub async fn try_press(&self, button: Button) -> PressOutcome {
+        let response = match self.http.post(press_url(&self.base, button)).send().await {
+            Ok(response) => response,
+            Err(error) if error.is_timeout() && !error.is_connect() => return PressOutcome::Unsure(self.unreachable(&error)),
+            Err(error) => return PressOutcome::Failed(self.unreachable(&error)),
+        };
         let code = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();
-        check_reply(code, &body)
+        match check_reply(code, &body) {
+            Ok(()) => PressOutcome::Pressed,
+            Err(error) => PressOutcome::Failed(error),
+        }
     }
 
     fn unreachable(&self, error: &reqwest::Error) -> String {

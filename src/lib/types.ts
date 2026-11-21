@@ -105,6 +105,8 @@ export interface AutomationConfig {
   inverter_max_w: number;
   geyser_start_hour: number;
   geyser_end_hour: number;
+  geyser_daily_on: boolean;
+  geyser_daily_on_hour: number;
   geyser_esp32_host: string;
   geyser_auto_control: boolean;
   geyser_first_weekdays: number[];

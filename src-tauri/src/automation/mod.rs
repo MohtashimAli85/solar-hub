@@ -127,7 +127,7 @@ pub struct AutomationState {
     /// by the next tick.
     pub loads_answer: Arc<Mutex<Option<loads::LoadsAnswer>>>,
     pub loads_edits: Arc<Mutex<Vec<loads::LoadEdit>>>,
-    pub geyser_request: Arc<Mutex<Option<loads::GeyserIntent>>>,
+    pub geyser_request: Arc<Mutex<Option<loads::GeyserRequest>>>,
     /// Bumped whenever the family changes a load, so an AI round planned on
     /// the old state is dropped instead of making them wait for it.
     pub loads_changed: Arc<Notify>,

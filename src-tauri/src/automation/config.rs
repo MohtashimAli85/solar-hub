@@ -43,6 +43,10 @@ pub struct AutomationConfig {
     pub inverter_max_w: f64,
     pub geyser_start_hour: u32,
     pub geyser_end_hour: u32,
+    /// Every day from this hour until sunset the geyser runs on its small
+    /// element, sun or not; the grid tops up what the sun can't.
+    pub geyser_daily_on: bool,
+    pub geyser_daily_on_hour: u32,
     /// The ESP32 IR blaster's host name or IP; empty means reminders only.
     pub geyser_esp32_host: String,
     pub geyser_auto_control: bool,
@@ -113,6 +117,8 @@ impl Default for AutomationConfig {
             inverter_max_w: 3600.0,
             geyser_start_hour: 10,
             geyser_end_hour: 16,
+            geyser_daily_on: true,
+            geyser_daily_on_hour: 15,
             geyser_esp32_host: String::new(),
             geyser_auto_control: false,
             geyser_first_weekdays: vec![4],
@@ -165,6 +171,7 @@ impl AutomationConfig {
         self.inverter_max_w = self.inverter_max_w.clamp(1000.0, 20_000.0);
         self.geyser_start_hour = self.geyser_start_hour.clamp(6, 17);
         self.geyser_end_hour = self.geyser_end_hour.clamp(self.geyser_start_hour + 1, 18);
+        self.geyser_daily_on_hour = self.geyser_daily_on_hour.clamp(10, 17);
         self.geyser_esp32_host = self.geyser_esp32_host.trim().to_string();
         self.geyser_auto_control &= !self.geyser_esp32_host.is_empty();
         self.geyser_first_weekdays.retain(|day| *day < 7);

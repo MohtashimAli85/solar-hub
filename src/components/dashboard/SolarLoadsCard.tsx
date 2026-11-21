@@ -3,6 +3,7 @@ import { GeyserHeatTime } from "./GeyserHeatTime";
 import { clock, modelLabel } from "@/components/automation/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Toggle } from "@/components/ui/toggle";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger } from "@/components/ui/select";
 import type {
   AutomationConfig,
@@ -178,7 +179,7 @@ interface LoadItem {
   line: string;
   status?: string;
   meter?: Meter;
-  lights?: { elements: GeyserElements; levels: [number, number] };
+  lights?: { elements: GeyserElements; levels: [number, number]; onToggle?: (name: ElementButton) => void; busy?: boolean };
   primary?: Primary;
   extras: Extra[];
 }
@@ -212,35 +213,69 @@ const ELEMENT_STATES: Record<ElementState, string> = {
   off: "off",
 };
 
-/** The two element switches as the app believes they are, like the panel's own lights. */
-function ElementLights({ elements, levels }: { elements: GeyserElements; levels: [number, number] }) {
-  const lights: [number, ElementState][] = [
-    [levels[0], elements.low],
-    [levels[1], elements.high],
+type ElementButton = "800" | "1200";
+
+function ElementDot({ state }: { state: ElementState }) {
+  return (
+    <span
+      className={
+        state === "off"
+          ? "size-2.5 rounded-full border border-border bg-muted"
+          : state === "heating"
+            ? "size-2.5 rounded-full bg-primary"
+            : "size-2.5 animate-pulse rounded-full bg-primary motion-reduce:animate-none"
+      }
+      aria-hidden
+    />
+  );
+}
+
+/** The two element switches as the app believes they are, like the panel's own lights; with the ESP32, each one presses its button. */
+function ElementLights({
+  elements,
+  levels,
+  onToggle,
+  busy,
+}: {
+  elements: GeyserElements;
+  levels: [number, number];
+  onToggle?: (name: ElementButton) => void;
+  busy?: boolean;
+}) {
+  const lights: [number, ElementState, ElementButton][] = [
+    [levels[0], elements.low, "800"],
+    [levels[1], elements.high, "1200"],
   ];
   const when = elements.at ? ` at ${clock(elements.at)}` : "";
   const summary = lights.map(([watts, state]) => `${watts} W ${ELEMENT_STATES[state]}`).join(", ");
   return (
     <div
       className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
-      role="img"
+      role={onToggle ? "group" : "img"}
       aria-label={`Elements: ${summary}${elements.unsure ? ", not sure" : ""}. From ${elements.why}${when}.`}
     >
-      {lights.map(([watts, state]) => (
-        <span key={watts} className="inline-flex items-center gap-1.5 tabular-nums">
-          <span
-            className={
-              state === "off"
-                ? "size-2.5 rounded-full border border-border bg-muted"
-                : state === "heating"
-                  ? "size-2.5 rounded-full bg-primary"
-                  : "size-2.5 animate-pulse rounded-full bg-primary motion-reduce:animate-none"
-            }
-            aria-hidden
-          />
-          {watts}
-        </span>
-      ))}
+      {lights.map(([watts, state, name]) =>
+        onToggle ? (
+          <Toggle
+            key={watts}
+            size="sm"
+            variant="outline"
+            className="tabular-nums"
+            pressed={state !== "off"}
+            onPressedChange={() => onToggle(name)}
+            disabled={busy}
+            aria-label={`${watts} W element, ${ELEMENT_STATES[state]}. Press to switch it ${state === "off" ? "on" : "off"}.`}
+          >
+            <ElementDot state={state} />
+            {watts}
+          </Toggle>
+        ) : (
+          <span key={watts} className="inline-flex items-center gap-1.5 tabular-nums">
+            <ElementDot state={state} />
+            {watts}
+          </span>
+        ),
+      )}
       <span className="truncate">
         {elements.unsure ? "Not sure: " : ""}
         {elements.why}
@@ -335,7 +370,7 @@ function LoadRowView({ item, menu }: { item: LoadItem; menu: ReactNode }) {
         </p>
         {item.status ? <p className="text-xs text-muted-foreground">{item.status}</p> : null}
         {item.meter ? <MeterBar meter={item.meter} /> : null}
-        {item.lights ? <ElementLights elements={item.lights.elements} levels={item.lights.levels} /> : null}
+        {item.lights ? <ElementLights {...item.lights} /> : null}
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-1.5">
         {item.primary && Action ? (
@@ -422,6 +457,8 @@ interface SolarLoadsCardProps {
   onWaterDone: () => void;
   onGeyserDone: () => void;
   onSwitchGeyser: (watts: number | null) => void;
+  onToggleElement: (name: ElementButton) => void;
+  togglePending: boolean;
   switchError: string | null;
   onReadScooter: () => void;
   onSkipScooter: () => void;
@@ -444,6 +481,8 @@ export function SolarLoadsCard({
   onWaterDone,
   onGeyserDone,
   onSwitchGeyser,
+  onToggleElement,
+  togglePending,
   switchError,
   onReadScooter,
   onSkipScooter,
@@ -508,8 +547,13 @@ export function SolarLoadsCard({
             label: `${geyser.delivered_kwh.toFixed(1)} / ${geyser.need_kwh.toFixed(1)} kWh${loads.geyser_first ? " · before the hotplate today" : ""}`,
           },
     lights:
-      geyser.elements && config
-        ? { elements: geyser.elements, levels: [config.geyser_low_watts, config.geyser_high_watts] }
+      config && (geyser.elements || canSwitch)
+        ? {
+            elements: geyser.elements ?? { low: "off", high: "off", unsure: true, why: "the app doesn't know yet", at: null },
+            levels: [config.geyser_low_watts, config.geyser_high_watts],
+            onToggle: canSwitch ? onToggleElement : undefined,
+            busy: togglePending,
+          }
         : undefined,
     primary:
       geyser.phase !== "off" && geyser.phase !== "done"

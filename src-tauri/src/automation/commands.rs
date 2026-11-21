@@ -6,7 +6,7 @@ use crate::geyser::{Button, GeyserRemote, RemoteStatus};
 use crate::scooter::{ScooterReading, ScooterState};
 use super::history::DecisionRow;
 use super::insights::AutomationInsights;
-use super::loads::{geyser_levels, EditState, GeyserIntent, LoadEdit, LoadKind, LoadPhase, LoadsAnswer};
+use super::loads::{geyser_levels, EditState, GeyserIntent, GeyserRequest, LoadEdit, LoadKind, LoadPhase, LoadsAnswer};
 use super::{AutomationState, AutomationStatus};
 use crate::notifications::Notifier;
 
@@ -267,7 +267,27 @@ pub async fn switch_geyser(state: State<'_, AutomationState>, watts: Option<f64>
         }
         None => GeyserIntent::Off,
     };
-    *state.geyser_request.lock().await = Some(intent);
+    *state.geyser_request.lock().await = Some(GeyserRequest::Switch(intent));
+    state.loads_touched();
+    Ok(())
+}
+
+/// Presses one element's button (800 or 1200) through the engine, so the
+/// press is remembered and checked on the load.
+#[tauri::command]
+pub async fn toggle_geyser_element(state: State<'_, AutomationState>, name: String) -> Result<(), String> {
+    let config = state.config().await;
+    if config.dry_run {
+        return Err("Dry run is on, so the app presses nothing".into());
+    }
+    if config.geyser_esp32_host.is_empty() {
+        return Err("Set the ESP32's address in the geyser settings first".into());
+    }
+    let button = match button(&name)? {
+        button @ (Button::W800 | Button::W1200) => button,
+        _ => return Err(format!("{name} isn't an element button")),
+    };
+    *state.geyser_request.lock().await = Some(GeyserRequest::Toggle(button));
     state.loads_touched();
     Ok(())
 }

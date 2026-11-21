@@ -96,7 +96,15 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
         onWaterDone={() => automation.waterDone.mutate()}
         onGeyserDone={() => automation.geyserDone.mutate()}
         onSwitchGeyser={(watts) => automation.geyserSwitch.mutate(watts)}
-        switchError={automation.geyserSwitch.error ? String(automation.geyserSwitch.error) : null}
+        onToggleElement={(name) => automation.geyserToggle.mutate(name)}
+        togglePending={automation.geyserToggle.isPending}
+        switchError={
+          automation.geyserSwitch.error
+            ? String(automation.geyserSwitch.error)
+            : automation.geyserToggle.error
+              ? String(automation.geyserToggle.error)
+              : null
+        }
         onReadScooter={() => automation.scooterRead.mutate(true)}
         onSkipScooter={() => automation.scooterSkip.mutate()}
         onEdit={(edit) => automation.loadEdit.mutate(edit)}

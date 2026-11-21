@@ -9,7 +9,7 @@ import { getGeyserRemote, pressGeyserButton, readScooterNow } from "@/lib/tauri"
 import type { AutomationConfig, GeyserButton } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
-import { clock, SectionTitle } from "./shared";
+import { clock, hourLabel, SectionTitle } from "./shared";
 import { HourField, NumberField, rangeError } from "./WaterTankSettings";
 
 type Range = { min: number; max: number };
@@ -144,6 +144,8 @@ type GeyserForm = Pick<
   | "geyser_enabled"
   | "geyser_start_hour"
   | "geyser_end_hour"
+  | "geyser_daily_on"
+  | "geyser_daily_on_hour"
   | "geyser_low_watts"
   | "geyser_high_watts"
   | "geyser_daily_kwh"
@@ -235,6 +237,8 @@ export function GeyserSettings({ config, saving, onSave }: SettingsProps) {
     geyser_enabled: config.geyser_enabled,
     geyser_start_hour: config.geyser_start_hour,
     geyser_end_hour: config.geyser_end_hour,
+    geyser_daily_on: config.geyser_daily_on,
+    geyser_daily_on_hour: config.geyser_daily_on_hour,
     geyser_low_watts: config.geyser_low_watts,
     geyser_high_watts: config.geyser_high_watts,
     geyser_daily_kwh: config.geyser_daily_kwh,
@@ -287,7 +291,23 @@ export function GeyserSettings({ config, saving, onSave }: SettingsProps) {
         checked={form.geyser_winter_only}
         onChange={(value) => set("geyser_winter_only", value)}
       />
+      <SwitchRow
+        id="geyser-daily-on"
+        label="Daily afternoon run"
+        help={`Every day from ${hourLabel(form.geyser_daily_on_hour)} until sunset the ESP32 switches the geyser on at ${form.geyser_low_watts} W, even when the water is already hot, so it stays hot for the night. The grid tops up what the sun can't. Never at night.`}
+        checked={form.geyser_daily_on}
+        onChange={(value) => set("geyser_daily_on", value)}
+      />
       <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        {form.geyser_daily_on ? (
+          <HourField
+            id="geyser-daily-hour"
+            label="Daily run from"
+            help="Runs until sunset."
+            value={form.geyser_daily_on_hour}
+            onChange={(value) => set("geyser_daily_on_hour", value)}
+          />
+        ) : null}
         <HourField
           id="geyser-start"
           label="Heat from"

@@ -163,6 +163,7 @@ pub fn run() {
             automation::commands::get_geyser_remote,
             automation::commands::press_geyser_button,
             automation::commands::switch_geyser,
+            automation::commands::toggle_geyser_element,
             automation::commands::send_test_notification,
             energy::commands::get_energy_summary,
             energy::commands::set_bill_reading,

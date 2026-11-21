@@ -23,7 +23,7 @@ use crate::automation::water::{self, WaterInput, WaterMemory};
 use crate::automation::weather::{self, Forecast, SummaryInput, WeatherSummary};
 use crate::automation::{AutomationState, Phase};
 use crate::battery::BatteryState;
-use crate::geyser::{Button, GeyserRemote};
+use crate::geyser::{Button, GeyserRemote, PressOutcome};
 use crate::inverter::client::SolarClient;
 use crate::inverter::types::output_mode_name;
 use crate::notifications::{NotificationSink, Notifier, Reading as NotifyReading};
@@ -1117,12 +1117,16 @@ async fn loads_reminder(
     if let Some(command) = step.geyser_command {
         let buttons: Vec<&str> = command.buttons.iter().map(|button| button.as_str()).collect();
         tracing::info!("geyser: pressing {buttons:?} for {:?} — {}", command.intent, step.status.geyser.row.note.as_deref().unwrap_or(""));
-        let ok = press_geyser(config, &command).await;
-        loads_log(state, now, &serde_json::json!({ "at": now, "pressed": buttons, "ok": ok }));
-        if !ok {
-            services.notifier.send(loads::GEYSER_TITLE, "The ESP32 geyser remote didn't answer, so nothing was pressed. Back to reminders for today.");
+        let sent = press_geyser(config, &command).await;
+        loads_log(state, now, &serde_json::json!({ "at": now, "pressed": buttons, "ok": sent == loads::Sent::Pressed, "sent": format!("{sent:?}") }));
+        if sent == loads::Sent::Failed {
+            let message = match command.intent {
+                loads::GeyserIntent::Off => "The ESP32 geyser remote didn't answer, so nothing was pressed and the geyser's elements are still on. Switch them off on the panel.",
+                loads::GeyserIntent::On(_) => "The ESP32 geyser remote didn't answer, so nothing was pressed. Back to reminders for today.",
+            };
+            services.notifier.send(loads::GEYSER_TITLE, message);
         }
-        memory.loads.geyser_sent(&command, now, ok);
+        memory.loads.geyser_sent(&command, now, sent);
     }
     if let Some(power_cycle) = step.ev_read {
         spawn_scooter_read(state, services, config, power_cycle);
@@ -1225,18 +1229,25 @@ async fn geyser_remote_ready(memory: &mut EngineMemory, config: &AutomationConfi
     ready
 }
 
-async fn press_geyser(config: &AutomationConfig, command: &GeyserCommand) -> bool {
+async fn press_geyser(config: &AutomationConfig, command: &GeyserCommand) -> loads::Sent {
     let remote = GeyserRemote::new(&config.geyser_esp32_host);
     for (index, button) in command.buttons.iter().enumerate() {
         if index > 0 {
             tokio::time::sleep(GEYSER_PRESS_GAP).await;
         }
-        if let Err(error) = remote.press(*button).await {
-            tracing::warn!("geyser remote could not press {}: {error}", button.as_str());
-            return false;
+        match remote.try_press(*button).await {
+            PressOutcome::Pressed => {}
+            PressOutcome::Unsure(error) => {
+                tracing::warn!("geyser remote may have pressed {} (no reply): {error}", button.as_str());
+                return loads::Sent::Unsure;
+            }
+            PressOutcome::Failed(error) => {
+                tracing::warn!("geyser remote could not press {}: {error}", button.as_str());
+                return if index == 0 { loads::Sent::Failed } else { loads::Sent::Unsure };
+            }
         }
     }
-    true
+    loads::Sent::Pressed
 }
 
 /// Bluetooth reads take a while, so they run beside the engine and the

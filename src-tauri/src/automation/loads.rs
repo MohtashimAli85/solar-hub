@@ -114,6 +114,7 @@ const HOTPLATE_GEYSER_ON_W: f64 = 3000.0;
 const HOTPLATE_KEEP_BELOW_W: f64 = 1800.0;
 /// A drain this big with the geyser on turns it down at once, watch or not.
 const GEYSER_DRAIN_ACT_W: f64 = 300.0;
+const NIGHT_REFUSAL: &str = "Nothing pressed: the geyser doesn't run at night. It heats in the sun from tomorrow morning.";
 /// How long the AI gets to answer a drain before the app turns the geyser down itself.
 const GEYSER_DRAIN_GRACE_MINUTES: i64 = 3;
 /// The inverter cloud only reports every few minutes; a press is judged on a
@@ -358,10 +359,26 @@ pub struct EvDecision {
     pub recheck_at: NaiveDateTime,
 }
 
+/// How a press went: answered, sent but never answered (it may have gone
+/// out, so the load decides), or never reached the ESP32.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    Pressed,
+    Unsure,
+    Failed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GeyserIntent {
     On(f64),
     Off,
+}
+
+/// What the family asked for on the card: a level, or one element's button.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GeyserRequest {
+    Switch(GeyserIntent),
+    Toggle(Button),
 }
 
 /// The element buttons are toggles, one per heating element; the geyser stays powered on.
@@ -410,7 +427,7 @@ pub struct LoadsInput<'a> {
     pub ev_reader_busy: bool,
     pub remote_ready: bool,
     /// The family asked the ESP32 to switch the geyser on at a level, or off.
-    pub geyser_request: Option<GeyserIntent>,
+    pub geyser_request: Option<GeyserRequest>,
     /// When the ESP32 last heard the family's own remote.
     pub geyser_heard_at: Option<NaiveDateTime>,
     /// Which button that was, when the ESP32 could tell.
@@ -1207,6 +1224,15 @@ struct GeyserControl {
     reheated_at: Option<NaiveDateTime>,
     /// The load and the buttons when the app last pressed to switch it on.
     on_sent: Option<(f64, Vec<Button>)>,
+    /// When the app last pressed off elements left on for the night, or told
+    /// the family it couldn't.
+    night_off_at: Option<NaiveDateTime>,
+    night_warned_at: Option<NaiveDateTime>,
+    /// The last press switched off elements that weren't drawing, so the load
+    /// can only show it went wrong (a rise), never that it worked.
+    idle_off: bool,
+    /// The day the daily afternoon run was switched on (or found running).
+    daily_on: Option<NaiveDate>,
 }
 
 /// The first minutes of a geyser run, watched before the plan may change it.
@@ -1368,17 +1394,23 @@ impl LoadsMemory {
         self.grid_now = loads.map(str::to_string);
     }
 
-    pub fn geyser_sent(&mut self, command: &GeyserCommand, now: NaiveDateTime, ok: bool) {
+    pub fn geyser_sent(&mut self, command: &GeyserCommand, now: NaiveDateTime, sent: Sent) {
         self.geyser.last_sent_at = Some(now);
-        if ok {
+        let presses: Vec<&str> = command.buttons.iter().map(|button| button.label()).collect();
+        if sent == Sent::Unsure {
+            self.elements.unsure = true;
+            self.elements.at = Some(now);
+            self.elements.why = format!("the ESP32 didn't confirm pressing {} at {}", presses.join(" and "), clock_time(now));
+        }
+        let ok = sent != Sent::Failed;
+        if sent == Sent::Pressed {
             let pressed = (command.buttons.contains(&Button::W800), command.buttons.contains(&Button::W1200));
             let after = match (self.elements.selected, command.intent) {
                 (Some((low, high)), _) => (low ^ pressed.0, high ^ pressed.1),
                 (None, GeyserIntent::On(_)) => pressed,
                 (None, GeyserIntent::Off) => (false, false),
             };
-            let presses: Vec<&str> = command.buttons.iter().map(|button| button.label()).collect();
-            self.elements.set(after, now, format!("the app pressed {} at {}", presses.join(" and "), clock_time(now)));
+            self.elements.set(after, now, format!("the app pressed {}", presses.join(" and ")));
         }
         if ok {
             let attempts = match self.geyser.pending {
@@ -1394,16 +1426,15 @@ impl LoadsMemory {
             self.geyser.failed_on = Some(now.date());
             self.geyser.pending = None;
         }
-        let presses: Vec<&str> = command.buttons.iter().map(|button| button.label()).collect();
         self.geyser.check = Some(GeyserCheck {
             action: intent_text(command.intent),
             sent_at: now,
             state: if ok { CheckState::Checking } else { CheckState::NotConfirmed },
             checked_at: (!ok).then_some(now),
-            note: if ok {
-                format!("Pressed {}; checking the load.", presses.join(", then "))
-            } else {
-                "The ESP32 didn't answer, so nothing was pressed.".into()
+            note: match sent {
+                Sent::Pressed => format!("Pressed {}; checking the load.", presses.join(", then ")),
+                Sent::Unsure => format!("Sent {} but the ESP32 didn't confirm; checking the load to see if it went through.", presses.join(", then ")),
+                Sent::Failed => "The ESP32 didn't answer, so nothing was pressed.".into(),
             },
         });
     }
@@ -1418,7 +1449,8 @@ impl LoadsMemory {
         self.geyser_heated_at = None;
         self.geyser_weak_notified = false;
         let (night_hold, readings_seen) = (self.geyser.night_hold, self.geyser.readings_seen);
-        self.geyser = GeyserControl { night_hold, readings_seen, ..GeyserControl::default() };
+        let (night_off_at, night_warned_at) = (self.geyser.night_off_at, self.geyser.night_warned_at);
+        self.geyser = GeyserControl { night_hold, readings_seen, night_off_at, night_warned_at, ..GeyserControl::default() };
         self.hotplate = HotplateMemory::default();
         self.ai = ai::AiMemory::default();
         self.ev.check = EvCheck::default();
@@ -2466,6 +2498,39 @@ pub fn step(memory: &mut LoadsMemory, input: &LoadsInput) -> LoadsStep {
         _ => geyser_verdict,
     };
     let after_sunset = !input.daytime || now >= sunset;
+    let daily_from = at_hour(today, config.geyser_daily_on_hour);
+    let daily_w = config.geyser_low_watts;
+    let daily_open = config.geyser_daily_on && auto && geyser_season && !after_sunset && !geyser_done && now >= daily_from;
+    if daily_open && geyser_running.is_some() {
+        memory.geyser.daily_on = Some(today);
+    }
+    let geyser_verdict = if daily_open {
+        let level = level_text(daily_w, config);
+        let (from, until) = (clock_time(daily_from), clock_time(sunset));
+        match &geyser_running {
+            Some(running) if level_matches(running, daily_w, config) => Verdict {
+                phase: LoadPhase::Running,
+                note: format!("Daily run from {from}: heating at {level} until sunset ({until}); the grid tops up what the sun can't."),
+                watts: None,
+                slot: None,
+            },
+            Some(_) => Verdict { phase: LoadPhase::Stop, note: format!("Daily run from {from}: geyser to {level} until sunset ({until})."), watts: Some(daily_w), slot: None },
+            None if memory.geyser.daily_on != Some(today) => Verdict {
+                phase: LoadPhase::Ready,
+                note: format!("It's past {from}: the geyser goes on at {level} until sunset ({until}), as every day."),
+                watts: Some(daily_w),
+                slot: None,
+            },
+            None => Verdict {
+                phase: LoadPhase::Done,
+                note: format!("Daily run: the {level} element stays on until sunset ({until}). Nothing drawing means the thermostat says the water is hot."),
+                watts: None,
+                slot: None,
+            },
+        }
+    } else {
+        geyser_verdict
+    };
     let draining_w = input
         .battery_w
         .map(|watts| -watts)
@@ -2729,6 +2794,27 @@ pub fn step(memory: &mut LoadsMemory, input: &LoadsInput) -> LoadsStep {
     out.extend(infos);
     result.notify = out;
 
+    let left_on = memory.elements.selected.filter(|&(low, high)| (low || high) && !memory.elements.unsure);
+    let idle_tonight = after_sunset && geyser_season && geyser_running.is_none() && memory.geyser.pending.is_none() && !memory.geyser.night_hold;
+    if let Some(selected) = left_on.filter(|_| idle_tonight) {
+        let due = |at: Option<NaiveDateTime>| at.is_none_or(|at| now - at >= night_repeat);
+        let esp32_set_up = config.geyser_auto_control && !config.dry_run && !config.geyser_esp32_host.is_empty();
+        if remote && due(memory.geyser.night_off_at) {
+            memory.geyser.night_off_at = Some(now);
+            memory.geyser.idle_elements = Some(selected);
+        } else if !remote && esp32_set_up && due(memory.geyser.night_warned_at) {
+            memory.geyser.night_warned_at = Some(now);
+            let which = names(&elements_off(selected).unwrap_or_default());
+            let noun = if selected.0 && selected.1 { "elements are" } else { "element is" };
+            result.notify.push((
+                GEYSER_TITLE,
+                format!(
+                    "The geyser's {which} {noun} still switched on and the ESP32 isn't answering (it loses power while smart load is on), so the app can't switch it off. The geyser heats again once it has power and the water cools: switch it off on the panel, or the app will as soon as the ESP32 is back."
+                ),
+            ));
+        }
+    }
+
     let control = if auto {
         Some(Control::Full)
     } else if remote {
@@ -2747,11 +2833,20 @@ pub fn step(memory: &mut LoadsMemory, input: &LoadsInput) -> LoadsStep {
             result.notify.push((GEYSER_TITLE, "The app has just started and is waiting for a fresh inverter reading; nothing pressed. Try again in a few minutes.".into()));
         }
     } else if let Some(request) = input.geyser_request {
-        result.geyser_command = manual_geyser(memory, request, geyser_running.as_ref(), !after_sunset, config, &mut result.notify);
+        result.geyser_command = match request {
+            GeyserRequest::Switch(intent) => manual_geyser(memory, intent, geyser_running.as_ref(), !after_sunset, config, &mut result.notify),
+            GeyserRequest::Toggle(button) => toggle_element(memory, button, geyser_running.as_ref(), !after_sunset, config, &mut result.notify),
+        };
     } else if let Some(control) = control.filter(|_| geyser_season) {
+        if daily_open {
+            memory.geyser.idle_elements = None;
+        }
         result.geyser_command = geyser_command(memory, &geyser_verdict, geyser_running.as_ref(), control, now, config, &mut result.notify);
+        if daily_open && result.geyser_command.as_ref().is_some_and(|command| matches!(command.intent, GeyserIntent::On(_))) {
+            memory.geyser.daily_on = Some(today);
+        }
         match result.geyser_command.as_ref().map(|command| command.intent) {
-            Some(GeyserIntent::On(_)) if reheat_open && geyser_running.is_none() => memory.geyser.reheat_since = Some(now),
+            Some(GeyserIntent::On(_)) if reheat_open && !daily_open && geyser_running.is_none() => memory.geyser.reheat_since = Some(now),
             Some(GeyserIntent::Off) => memory.geyser.reheat_since = None,
             _ => {}
         }
@@ -2882,6 +2977,13 @@ pub fn step(memory: &mut LoadsMemory, input: &LoadsInput) -> LoadsStep {
             .collect();
         if names.is_empty() { "the loads on now".to_string() } else { names.join(" and ") }
     });
+    if daily_open && geyser_running.is_some() {
+        memory.grid_now = Some(match memory.grid_now.take() {
+            Some(names) if names.contains("geyser") => names,
+            Some(names) => format!("{names} and the geyser"),
+            None => "the geyser".to_string(),
+        });
+    }
     let own_press = |at: NaiveDateTime| memory.geyser.last_sent_at.is_some_and(|sent| (at - sent).num_seconds().abs() <= 30);
     let new_press = |at: NaiveDateTime| memory.elements.at.is_none_or(|seen| at > seen + Duration::seconds(HEARD_SAME_PRESS_SECONDS));
     if let Some(heard) = input.geyser_heard_at.filter(|at| !own_press(*at) && new_press(*at)) {
@@ -2894,7 +2996,7 @@ pub fn step(memory: &mut LoadsMemory, input: &LoadsInput) -> LoadsStep {
             (Some((low, high)), Some((flip_low, flip_high))) => {
                 let button = input.geyser_heard_button.map_or("", |button| button.label());
                 let unsure = memory.elements.unsure;
-                memory.elements.set((low ^ flip_low, high ^ flip_high), heard, format!("{button} pressed on the remote at {}", clock_time(heard)));
+                memory.elements.set((low ^ flip_low, high ^ flip_high), heard, format!("{button} pressed on the remote"));
                 memory.elements.unsure = unsure;
             }
             _ => {
@@ -3245,6 +3347,10 @@ fn manual_geyser(
     notify: &mut Vec<(&'static str, String)>,
 ) -> Option<GeyserCommand> {
     let control = &mut memory.geyser;
+    if matches!(request, GeyserIntent::On(_)) && !daytime {
+        notify.push((GEYSER_TITLE, NIGHT_REFUSAL.into()));
+        return None;
+    }
     if matches!(request, GeyserIntent::On(_)) && running.is_none() && control.unknown_w > GEYSER_UNKNOWN_LOAD_W {
         notify.push((
             GEYSER_TITLE,
@@ -3272,6 +3378,7 @@ fn manual_geyser(
     };
     control.pending = None;
     control.failed_on = None;
+    control.idle_off = false;
     let buttons = match (request, running) {
         (GeyserIntent::On(target), None) => geyser_toggles((false, false), target, config),
         (GeyserIntent::On(target), Some(r)) => geyser_elements(r.watts, config).and_then(|on| geyser_toggles(on, target, config)),
@@ -3302,6 +3409,47 @@ fn manual_geyser(
     };
     notify.push((GEYSER_TITLE, format!("You asked for the geyser {what}: pressing {}.{after}", names(&buttons))));
     Some(GeyserCommand { intent: request, buttons })
+}
+
+/// One element's button, pressed because the family clicked it. What it
+/// does is worked out from what is drawing, else from what the app believes
+/// is switched on, and then checked on the load like any other press.
+fn toggle_element(
+    memory: &mut LoadsMemory,
+    button: Button,
+    running: Option<&Running>,
+    daytime: bool,
+    config: &AutomationConfig,
+    notify: &mut Vec<(&'static str, String)>,
+) -> Option<GeyserCommand> {
+    let flip = match button {
+        Button::W800 => (true, false),
+        Button::W1200 => (false, true),
+        _ => return None,
+    };
+    let now_on = running
+        .and_then(|r| geyser_elements(r.watts, config))
+        .or(memory.elements.selected)
+        .unwrap_or((false, false));
+    let after = (now_on.0 ^ flip.0, now_on.1 ^ flip.1);
+    let level: f64 = [(after.0, config.geyser_low_watts), (after.1, config.geyser_high_watts)].iter().filter(|(on, _)| *on).map(|(_, watts)| watts).sum();
+    let intent = if level > 0.0 { GeyserIntent::On(level) } else { GeyserIntent::Off };
+    let control = &mut memory.geyser;
+    let adding = (flip.0 && after.0) || (flip.1 && after.1);
+    if adding && !daytime {
+        notify.push((GEYSER_TITLE, NIGHT_REFUSAL.into()));
+        return None;
+    }
+    if adding && level > control.room_w + 1.0 {
+        notify.push((GEYSER_TITLE, format!("Nothing pressed: {level:.0} W would overload the inverter with what else is on.")));
+        return None;
+    }
+    control.pending = None;
+    control.failed_on = None;
+    control.idle_off = intent == GeyserIntent::Off && running.is_none();
+    let what = if adding { "on" } else { "off" };
+    notify.push((GEYSER_TITLE, format!("You pressed {}: switching that element {what}.", button.label())));
+    Some(GeyserCommand { intent, buttons: vec![button] })
 }
 
 /// With the ESP32 in charge, the plan becomes button presses. The geyser
@@ -3347,10 +3495,25 @@ fn geyser_command(
         let fresh = control.reading_at.unwrap_or(now) >= sent_at + Duration::seconds(GEYSER_SETTLE_SECONDS);
         let waited = fresh && now - sent_at >= Duration::minutes(GEYSER_COMMAND_WAIT_MINUTES);
         match (intent, running) {
-            (GeyserIntent::Off, None) => {
+            (GeyserIntent::Off, None) if fresh && control.idle_off && memory.elements.unsure => {
+                control.pending = None;
+                control.checked(
+                    now,
+                    CheckState::NotConfirmed,
+                    "The ESP32 didn't confirm the press, and with nothing drawing the load can't show whether its elements are off.".into(),
+                );
+                notify.push((
+                    GEYSER_TITLE,
+                    "The ESP32 didn't confirm switching the geyser's elements off, and with the water hot the load can't show it. Check the panel and tap Change on the geyser.".into(),
+                ));
+            }
+            (GeyserIntent::Off, None) if fresh => {
                 control.pending = None;
                 control.checked(now, CheckState::Confirmed, "Nothing is drawing on the load: its elements are off.".into());
                 notify.push((GEYSER_TITLE, "Confirmed: the geyser's elements are off.".into()));
+                if memory.elements.unsure && !control.idle_off {
+                    memory.elements.set((false, false), now, format!("the load stopped after pressing off at {}", clock_time(sent_at)));
+                }
             }
             (GeyserIntent::On(target), Some(r)) if level_matches(r, target, config) => {
                 control.pending = None;
@@ -3360,6 +3523,7 @@ fn geyser_command(
             _ if !waited => return None,
             (GeyserIntent::Off, Some(r)) if attempts < 2 => {
                 if let Some(buttons) = geyser_elements(r.watts, config).and_then(elements_off) {
+                    control.idle_off = false;
                     notify.push((GEYSER_TITLE, format!("The geyser is still drawing {:.0} W — pressing {} again.", r.watts, names(&buttons))));
                     return Some(GeyserCommand { intent, buttons });
                 }
@@ -3394,6 +3558,15 @@ fn geyser_command(
                     ),
                 ));
                 return Some(GeyserCommand { intent: GeyserIntent::On(target), buttons });
+            }
+            (GeyserIntent::On(_), None) if control.daily_on == Some(now.date()) => {
+                control.pending = None;
+                control.checked(
+                    now,
+                    CheckState::NotConfirmed,
+                    "No draw: its thermostat says the water is still hot. The element stays on and heats when it cools, until sunset.".into(),
+                );
+                return None;
             }
             (GeyserIntent::On(_), None) => {
                 control.pending = None;
@@ -3435,10 +3608,11 @@ fn geyser_command(
         return None;
     }
     let full = control_by == Control::Full;
-    if let Some(selected) = control.idle_elements.take().filter(|_| full && running.is_none()) {
+    if let Some(selected) = control.idle_elements.take().filter(|_| running.is_none()) {
         let buttons = elements_off(selected)?;
         let level = [(selected.0, config.geyser_low_watts), (selected.1, config.geyser_high_watts)].iter().filter(|(on, _)| *on).map(|(_, w)| w).sum();
         control.idle_check = control.last_load_w.map(|load| (load, level));
+        control.idle_off = true;
         notify.push((
             GEYSER_TITLE,
             format!("The thermostat cut the geyser out, so the water is hot: pressing {} so it doesn't heat again on its own.", names(&buttons)),
@@ -3474,6 +3648,7 @@ fn geyser_command(
     if matches!((command.intent, running), (GeyserIntent::Off, Some(_))) {
         control.stepped_down_at = Some(now);
     }
+    control.idle_off = false;
     let message = match (command.intent, running) {
         (GeyserIntent::On(watts), None) => format!("Switching the geyser on at {watts:.0} W ({}). {}", names(&command.buttons), verdict.note),
         (GeyserIntent::On(watts), Some(r)) if watts > r.watts => format!("Turning the geyser up to {watts:.0} W ({}). {}", names(&command.buttons), verdict.note),
@@ -4394,7 +4569,7 @@ mod tests {
         memory.geyser.last_load_w = Some(2200.0);
         let command = geyser_command(&mut memory, &on, None, Control::Full, at(11, 54), &config, &mut notify).unwrap();
         assert_eq!(command.buttons, vec![Button::W800]);
-        memory.geyser_sent(&command, at(11, 54), true);
+        memory.geyser_sent(&command, at(11, 54), Sent::Pressed);
         memory.geyser.last_load_w = Some(1489.0);
         memory.geyser.reading_at = Some(at(11, 58));
         let again = geyser_command(&mut memory, &on, None, Control::Full, at(11, 58), &config, &mut notify).unwrap();
@@ -4443,6 +4618,178 @@ mod tests {
         night.daytime = false;
         let result = step(&mut memory, &night);
         assert_eq!(result.status.geyser.row.phase, LoadPhase::Stop);
+    }
+
+    fn night_input(now: NaiveDateTime, load: f64, remote_ready: bool, config: &AutomationConfig) -> LoadsInput<'_> {
+        let mut night = input(now, 80.0, 0.0, load, None, config);
+        night.daytime = false;
+        night.remote_ready = remote_ready;
+        night
+    }
+
+    fn left_on_tonight() -> (AutomationConfig, LoadsMemory) {
+        let config = AutomationConfig { geyser_auto_control: true, geyser_esp32_host: "geyser".into(), dry_run: false, ..config() };
+        let mut memory = running_app();
+        memory.elements.set((false, true), at(14, 26), "the load shows it drawing about 1200 W at 2:26 PM".into());
+        (config, memory)
+    }
+
+    #[test]
+    fn an_element_left_on_is_switched_off_at_night_and_the_load_checks_it() {
+        let (config, mut memory) = left_on_tonight();
+        let first = step(&mut memory, &night_input(at(19, 0), 200.0, true, &config));
+        let command = first.geyser_command.unwrap();
+        assert_eq!(command, GeyserCommand { intent: GeyserIntent::Off, buttons: vec![Button::W1200] });
+        memory.geyser_sent(&command, at(19, 0), Sent::Pressed);
+
+        let mut retried = None;
+        for minutes in [2, 4, 6] {
+            let result = step(&mut memory, &night_input(at(19, minutes), 1400.0, true, &config));
+            if let Some(command) = result.geyser_command {
+                assert!(result.notify.iter().any(|(_, body)| body.contains("still drawing")));
+                retried = Some((command, minutes));
+                break;
+            }
+        }
+        let (again, minutes) = retried.expect("the rise in the load means the press switched it on, so it presses again");
+        assert_eq!(again.buttons, vec![Button::W1200]);
+        memory.geyser_sent(&again, at(19, minutes), Sent::Pressed);
+
+        let told = [minutes + 2, minutes + 4].into_iter().any(|later| {
+            let result = step(&mut memory, &night_input(at(19, later), 1400.0 + f64::from(later), true, &config));
+            assert!(result.geyser_command.is_none());
+            result.notify.iter().any(|(_, body)| body.contains("switch its elements off by hand"))
+        });
+        assert!(told, "still on after two tries: the family is told");
+    }
+
+    #[test]
+    fn an_element_left_on_is_not_pressed_twice_in_a_night() {
+        let (config, mut memory) = left_on_tonight();
+        let command = step(&mut memory, &night_input(at(19, 0), 200.0, true, &config)).geyser_command.unwrap();
+        memory.geyser_sent(&command, at(19, 0), Sent::Unsure);
+        let quiet = step(&mut memory, &night_input(at(19, 3), 210.0, true, &config));
+        assert!(quiet.notify.iter().any(|(_, body)| body.contains("didn't confirm switching")));
+        for minutes in [10, 30, 50] {
+            assert!(step(&mut memory, &night_input(at(19, minutes), 200.0 + f64::from(minutes), true, &config)).geyser_command.is_none());
+        }
+    }
+
+    #[test]
+    fn an_element_left_on_with_the_esp32_offline_is_told_once() {
+        let (config, mut memory) = left_on_tonight();
+        let first = step(&mut memory, &night_input(at(19, 0), 200.0, false, &config));
+        assert!(first.geyser_command.is_none());
+        assert!(first.notify.iter().any(|(_, body)| body.contains("1200 W element is still switched on")));
+        let later = step(&mut memory, &night_input(at(19, 30), 210.0, false, &config));
+        assert!(later.notify.iter().all(|(_, body)| !body.contains("still switched on")));
+    }
+
+    #[test]
+    fn an_element_button_toggles_just_that_element_from_what_is_on() {
+        let (config, mut memory) = left_on_tonight();
+        let sun = sunny(800.0);
+        let mut click = auto_input(at(11, 0), 300.0, &sun, &config);
+        click.geyser_request = Some(GeyserRequest::Toggle(Button::W800));
+        let add = step(&mut memory, &click).geyser_command.unwrap();
+        assert_eq!(add, GeyserCommand { intent: GeyserIntent::On(2000.0), buttons: vec![Button::W800] });
+        memory.geyser_sent(&add, at(11, 0), Sent::Pressed);
+        assert_eq!(memory.elements.selected, Some((true, true)));
+
+        let mut click = auto_input(at(11, 1), 2300.0, &sun, &config);
+        click.geyser_request = Some(GeyserRequest::Toggle(Button::W1200));
+        let drop = step(&mut memory, &click).geyser_command.unwrap();
+        assert_eq!(drop, GeyserCommand { intent: GeyserIntent::On(800.0), buttons: vec![Button::W1200] });
+    }
+
+    #[test]
+    fn an_element_button_switches_off_an_idle_element() {
+        let (config, mut memory) = left_on_tonight();
+        let sun = sunny(800.0);
+        let mut click = auto_input(at(11, 0), 300.0, &sun, &config);
+        click.geyser_request = Some(GeyserRequest::Toggle(Button::W1200));
+        let off = step(&mut memory, &click).geyser_command.unwrap();
+        assert_eq!(off, GeyserCommand { intent: GeyserIntent::Off, buttons: vec![Button::W1200] });
+        assert!(memory.geyser.idle_off);
+        memory.geyser_sent(&off, at(11, 0), Sent::Pressed);
+        assert_eq!(memory.elements.selected, Some((false, false)));
+    }
+
+    fn hot_by_afternoon() -> (AutomationConfig, LoadsMemory) {
+        let config = AutomationConfig { geyser_auto_control: true, geyser_esp32_host: "geyser".into(), dry_run: false, ..config() };
+        let mut memory = running_app();
+        memory.geyser_heated_at = Some(at(12, 25));
+        memory.geyser_delivered_wh = 2900.0;
+        memory.geyser.reheated_at = Some(at(13, 30));
+        memory.elements.set((false, false), at(14, 31), "the app pressed 1200 W".into());
+        (config, memory)
+    }
+
+    #[test]
+    fn at_three_the_geyser_goes_on_at_800_until_sunset_even_when_hot() {
+        let (config, mut memory) = hot_by_afternoon();
+        let sun = sunny(800.0);
+        let three = step(&mut memory, &auto_input(at(15, 0), 310.0, &sun, &config));
+        let command = three.geyser_command.unwrap();
+        assert_eq!(command, GeyserCommand { intent: GeyserIntent::On(800.0), buttons: vec![Button::W800] });
+        memory.geyser_sent(&command, at(15, 0), Sent::Pressed);
+
+        let quiet = step(&mut memory, &auto_input(at(15, 4), 300.0, &sun, &config));
+        assert!(quiet.geyser_command.is_none());
+        assert!(memory.geyser.failed_on.is_none(), "no draw only means the water is hot");
+        for minutes in [15, 30, 59] {
+            let later = step(&mut memory, &auto_input(at(15, minutes), 300.0 + f64::from(minutes), &sun, &config));
+            assert!(later.geyser_command.is_none(), "pressing 800 again would switch it off");
+        }
+        assert!(memory.geyser.idle_elements.is_none() && memory.elements.selected == Some((true, false)), "the element stays on until sunset");
+    }
+
+    #[test]
+    fn the_daily_run_keeps_800_and_lets_the_grid_top_up() {
+        let (config, mut memory) = hot_by_afternoon();
+        let sun = sunny(800.0);
+        step(&mut memory, &auto_input(at(15, 0), 300.0, &sun, &config));
+        memory.geyser_sent(&GeyserCommand { intent: GeyserIntent::On(800.0), buttons: vec![Button::W800] }, at(15, 0), Sent::Pressed);
+        let mut heating = auto_input(at(15, 3), 1100.0, &sun, &config);
+        heating.battery_w = Some(-200.0);
+        step(&mut memory, &heating);
+        let mut later = auto_input(at(15, 20), 1110.0, &sun, &config);
+        later.battery_w = Some(-200.0);
+        let result = step(&mut memory, &later);
+        assert!(result.geyser_command.is_none());
+        assert_eq!(result.status.geyser.row.phase, LoadPhase::Running);
+        assert!(memory.grid_now().is_some_and(|names| names.contains("geyser")));
+    }
+
+    #[test]
+    fn at_night_the_geyser_is_never_switched_on_by_hand() {
+        let (config, mut memory) = left_on_tonight();
+        memory.elements.set((false, false), at(18, 0), "you said it's off".into());
+        let mut click = night_input(at(19, 0), 200.0, true, &config);
+        click.geyser_request = Some(GeyserRequest::Toggle(Button::W800));
+        let result = step(&mut memory, &click);
+        assert!(result.geyser_command.is_none());
+        assert!(result.notify.iter().any(|(_, body)| body.contains("doesn't run at night")));
+
+        let mut ask = night_input(at(19, 5), 210.0, true, &config);
+        ask.geyser_request = Some(GeyserRequest::Switch(GeyserIntent::On(800.0)));
+        assert!(step(&mut memory, &ask).geyser_command.is_none());
+    }
+
+    #[test]
+    fn a_press_the_esp32_never_answered_is_checked_on_the_load() {
+        let config = AutomationConfig { geyser_auto_control: true, geyser_esp32_host: "geyser".into(), ..config() };
+        let sun = sunny(800.0);
+        let mut memory = running_app();
+        let command = step(&mut memory, &auto_input(at(11, 0), 300.0, &sun, &config)).geyser_command.unwrap();
+        let GeyserIntent::On(target) = command.intent else { panic!("expected an On command") };
+        memory.geyser_sent(&command, at(11, 0), Sent::Unsure);
+        assert!(memory.geyser.failed_on.is_none());
+        assert!(memory.geyser.pending.is_some());
+        assert!(memory.elements.unsure);
+        let settled = step(&mut memory, &auto_input(at(11, 2), 300.0 + target, &sun, &config));
+        assert!(settled.notify.iter().any(|(_, body)| body.starts_with("Confirmed: the geyser is on")));
+        assert!(!memory.elements.unsure);
     }
 
     #[test]
@@ -4583,12 +4930,12 @@ mod tests {
         let sun = sunny(800.0);
         let mut memory = running_app();
         let mut ask = input(at(11, 0), 100.0, 400.0, 300.0, Some(&sun), &config);
-        ask.geyser_request = Some(GeyserIntent::On(1200.0));
+        ask.geyser_request = Some(GeyserRequest::Switch(GeyserIntent::On(1200.0)));
         let first = step(&mut memory, &ask);
         let command = first.geyser_command.unwrap();
         assert_eq!(command, GeyserCommand { intent: GeyserIntent::On(1200.0), buttons: vec![Button::W1200] });
         assert!(first.notify.iter().any(|(_, body)| body.starts_with("You asked for the geyser on at 1200 W")));
-        memory.geyser_sent(&command, at(11, 0), true);
+        memory.geyser_sent(&command, at(11, 0), Sent::Pressed);
 
         let on = step(&mut memory, &input(at(11, 2), 100.0, 400.0, 1500.0, Some(&sun), &config));
         assert!(on.geyser_command.is_none());
@@ -4636,7 +4983,7 @@ mod tests {
         let GeyserIntent::On(target) = command.intent else { panic!("expected an On command") };
         assert_eq!(Some(command.buttons.clone()), geyser_toggles((false, false), target, &config));
         assert!(!command.buttons.contains(&Button::Power), "On/Off is never pressed");
-        memory.geyser_sent(&command, at(11, 0), true);
+        memory.geyser_sent(&command, at(11, 0), Sent::Pressed);
         assert_eq!(memory.geyser.check.as_ref().map(|check| check.state), Some(CheckState::Checking));
 
         let settled = step(&mut memory, &auto_input(at(11, 2), 300.0 + target, &sun, &config));
@@ -4652,7 +4999,7 @@ mod tests {
         let mut memory = running_app();
         let command = step(&mut memory, &auto_input(at(11, 0), 300.0, &sun, &config)).geyser_command.unwrap();
         let GeyserIntent::On(target) = command.intent else { panic!("expected an On command") };
-        memory.geyser_sent(&command, at(11, 0), true);
+        memory.geyser_sent(&command, at(11, 0), Sent::Pressed);
         let other = if (target - config.geyser_low_watts).abs() > 1.0 { config.geyser_low_watts } else { config.geyser_high_watts };
         let other_elements = geyser_elements(other, &config).unwrap();
         assert!(step(&mut memory, &auto_input(at(11, 2), 300.0 + other, &sun, &config)).geyser_command.is_none(), "waits a few minutes");
@@ -4666,7 +5013,7 @@ mod tests {
         let sun = sunny(800.0);
         let mut memory = running_app();
         let command = step(&mut memory, &auto_input(at(11, 0), 300.0, &sun, &config)).geyser_command.unwrap();
-        memory.geyser_sent(&command, at(11, 0), true);
+        memory.geyser_sent(&command, at(11, 0), Sent::Pressed);
         let stale = step(&mut memory, &auto_input(at(11, 4), 300.0, &sun, &config));
         assert!(stale.geyser_command.is_none() && memory.geyser.pending.is_some(), "no reading since the press yet");
         let quiet = step(&mut memory, &auto_input(at(11, 5), 310.0, &sun, &config));
@@ -4691,12 +5038,15 @@ mod tests {
         let both = Running { watts: 2000.0, since: at(17, 0) };
         let command = geyser_command(&mut memory, &off, Some(&both), Control::Full, at(17, 30), &config, &mut notify).unwrap();
         assert_eq!(command, GeyserCommand { intent: GeyserIntent::Off, buttons: vec![Button::W800, Button::W1200] });
-        memory.geyser_sent(&command, at(17, 30), true);
+        memory.geyser_sent(&command, at(17, 30), Sent::Pressed);
         memory.geyser.reading_at = Some(at(17, 34));
         let high = Running { watts: 1200.0, since: at(17, 0) };
         let again = geyser_command(&mut memory, &off, Some(&high), Control::Full, at(17, 34), &config, &mut notify).unwrap();
         assert_eq!(again.buttons, vec![Button::W1200], "only what is still on");
-        memory.geyser_sent(&again, at(17, 34), true);
+        memory.geyser_sent(&again, at(17, 34), Sent::Pressed);
+        assert!(geyser_command(&mut memory, &off, None, Control::Full, at(17, 35), &config, &mut notify).is_none());
+        assert_eq!(memory.geyser.check.as_ref().map(|check| check.state), Some(CheckState::Checking), "waits for a reading after the press");
+        memory.geyser.reading_at = Some(at(17, 36));
         assert!(geyser_command(&mut memory, &off, None, Control::Full, at(17, 36), &config, &mut notify).is_none());
         assert_eq!(memory.geyser.check.as_ref().map(|check| check.state), Some(CheckState::Confirmed));
         assert!(notify.iter().all(|(_, body)| !body.contains("On/Off")));
@@ -4770,9 +5120,9 @@ mod tests {
         let sun = sunny(800.0);
         let mut memory = running_app();
         let mut ask = auto_input(at(11, 0), 300.0, &sun, &config);
-        ask.geyser_request = Some(GeyserIntent::On(1200.0));
+        ask.geyser_request = Some(GeyserRequest::Switch(GeyserIntent::On(1200.0)));
         let command = step(&mut memory, &ask).geyser_command.unwrap();
-        memory.geyser_sent(&command, at(11, 0), true);
+        memory.geyser_sent(&command, at(11, 0), Sent::Pressed);
         step(&mut memory, &auto_input(at(11, 2), 1500.0, &sun, &config));
         assert_eq!(memory.detector.running(LoadKind::Geyser).map(|r| r.watts), Some(1200.0));
 
@@ -4799,7 +5149,7 @@ mod tests {
         assert_eq!(log["command"]["buttons"], serde_json::json!(["800"]));
         assert_eq!(log["answer"], "Yes");
         assert_eq!(log["hotplate_maybe_on"], true);
-        memory.geyser_sent(&command, at(12, 41), true);
+        memory.geyser_sent(&command, at(12, 41), Sent::Pressed);
         step(&mut memory, &auto_input(at(12, 46), 1900.0, &sun, &config));
         assert_eq!(memory.detector.running(LoadKind::Geyser).map(|r| r.watts), Some(800.0));
 
@@ -4850,7 +5200,7 @@ mod tests {
         cut.remote_ready = false;
         let warm = step(&mut memory, &cut).status.geyser.elements.unwrap();
         assert_eq!((warm.low, warm.high), (ElementState::KeepWarm, ElementState::KeepWarm));
-        memory.geyser_sent(&GeyserCommand { intent: GeyserIntent::Off, buttons: vec![Button::W1200] }, at(11, 41), true);
+        memory.geyser_sent(&GeyserCommand { intent: GeyserIntent::Off, buttons: vec![Button::W1200] }, at(11, 41), Sent::Pressed);
         let mut after = auto_input(at(11, 42), 300.0, &sun, &config);
         after.remote_ready = false;
         let one = step(&mut memory, &after).status.geyser.elements.unwrap();
@@ -4917,9 +5267,9 @@ mod tests {
         let sun = sunny(800.0);
         let mut memory = running_app();
         let mut ask = auto_input(at(11, 0), 300.0, &sun, &config);
-        ask.geyser_request = Some(GeyserIntent::On(2000.0));
+        ask.geyser_request = Some(GeyserRequest::Switch(GeyserIntent::On(2000.0)));
         let command = step(&mut memory, &ask).geyser_command.unwrap();
-        memory.geyser_sent(&command, at(11, 0), true);
+        memory.geyser_sent(&command, at(11, 0), Sent::Pressed);
         let on = step(&mut memory, &auto_input(at(11, 2), 2300.0, &sun, &config));
         assert_eq!(on.status.geyser.row.running_w, Some(2000.0));
         assert!(on.status.geyser.watch_until.is_some());
@@ -5028,7 +5378,7 @@ mod tests {
         let first = step(&mut restarted, &auto_input(at(11, 0), 1100.0, &sun, &config));
         assert!(first.geyser_command.is_none(), "800 W the app can't place may be the geyser already on");
         let mut ask = auto_input(at(11, 1), 1110.0, &sun, &config);
-        ask.geyser_request = Some(GeyserIntent::On(1200.0));
+        ask.geyser_request = Some(GeyserRequest::Switch(GeyserIntent::On(1200.0)));
         let manual = step(&mut restarted, &ask);
         assert!(manual.geyser_command.is_none());
         assert!(manual.notify.iter().any(|(_, body)| body.contains("can't place")));
@@ -5081,7 +5431,7 @@ mod tests {
         let cut = step(&mut memory, &auto_input(at(13, 53), 1100.0, &sun, &config));
         assert!(memory.geyser_heated_at.is_some(), "{}", cut.log.as_ref().unwrap());
         let command = cut.geyser_command.expect("the idle element is switched off");
-        memory.geyser_sent(&command, at(13, 53), true);
+        memory.geyser_sent(&command, at(13, 53), Sent::Pressed);
 
         let after = step(&mut memory, &auto_input(at(13, 58), 300.0, &sun, &config));
         assert!(memory.geyser_heated_at.is_none(), "{:?}", after.log);
@@ -5111,7 +5461,7 @@ mod tests {
         let command = on.geyser_command.clone().unwrap_or_else(|| panic!("{}", on.log.as_ref().unwrap()));
         let GeyserIntent::On(level) = command.intent else { panic!("{command:?}") };
         assert!(on.notify.iter().any(|(_, body)| body.contains("topping it up")));
-        memory.geyser_sent(&command, at(13, 10), true);
+        memory.geyser_sent(&command, at(13, 10), Sent::Pressed);
         step(&mut memory, &auto_input(at(13, 14), 320.0 + level, &sun, &config));
         assert!(memory.detector.running(LoadKind::Geyser).is_some());
 
@@ -5121,7 +5471,7 @@ mod tests {
         assert!(cut.notify.iter().any(|(_, body)| body.starts_with("Topped up")));
         let off = cut.geyser_command.expect("the elements are switched off after the top-up");
         assert_eq!(off.intent, GeyserIntent::Off);
-        memory.geyser_sent(&off, at(13, 45), true);
+        memory.geyser_sent(&off, at(13, 45), Sent::Pressed);
 
         let later = step(&mut memory, &auto_input(at(14, 30), 340.0, &sun, &config));
         assert!(later.geyser_command.is_none());
@@ -5136,7 +5486,7 @@ mod tests {
         let mut memory = hot_since_11_33(&config, &sun);
         let on = step(&mut memory, &auto_input(at(13, 10), 320.0, &sun, &config));
         let command = on.geyser_command.unwrap();
-        memory.geyser_sent(&command, at(13, 10), true);
+        memory.geyser_sent(&command, at(13, 10), Sent::Pressed);
 
         let none = step(&mut memory, &auto_input(at(13, 14), 325.0, &sun, &config));
         assert!(none.geyser_command.is_none());
