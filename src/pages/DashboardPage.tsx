@@ -2,7 +2,6 @@ import { AutomationSummaryCard } from "@/components/dashboard/AutomationSummaryC
 import { CommandHero } from "@/components/dashboard/CommandHero";
 import { BillCard } from "@/components/dashboard/BillCard";
 import { UnitsCard } from "@/components/dashboard/UnitsCard";
-import { NowStrip } from "@/components/dashboard/NowStrip";
 import { SolarLoadsCard } from "@/components/dashboard/SolarLoadsCard";
 import { SunCurveCard } from "@/components/dashboard/SunCurveCard";
 import { OutputSourcePanel } from "@/components/inverter/OutputSourcePanel";
@@ -32,14 +31,6 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
         <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Dashboard</h1>
         <p className="text-sm text-muted-foreground">Where your power is coming from and going, and what the automation is doing.</p>
       </div>
-
-      <NowStrip
-        loads={automation.status?.loads}
-        water={automation.status?.water}
-        pending={automation.loadEdit.isPending || automation.questionAnswer.isPending}
-        onEdit={(edit) => automation.loadEdit.mutate(edit)}
-        onAnswer={(yes) => automation.questionAnswer.mutate(yes)}
-      />
 
       <CommandHero
         battery={battery.snapshot}

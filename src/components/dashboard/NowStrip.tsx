@@ -1,7 +1,12 @@
+import { useState } from "react";
 import { clock } from "@/components/automation/shared";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { useAutomation } from "@/hooks/useAutomation";
+import { useToastPosition, type ToastPosition } from "@/hooks/useToastPosition";
+import { cn } from "@/lib/utils";
 import type { LoadEdit, LoadKind, LoadRow, LoadsStatus, WaterStatus } from "@/lib/types";
-import { Bike, Check, CookingPot, Droplets, Flame, MessageCircleQuestion, type LucideIcon } from "lucide-react";
+import { Bike, Check, CookingPot, Droplets, Flame, MessageCircleQuestion, X, type LucideIcon } from "lucide-react";
 
 interface Action {
   label: string;
@@ -47,24 +52,48 @@ function rowItem(kind: LoadKind, row: LoadRow, onEdit: (edit: LoadEdit) => void)
   return null;
 }
 
+const PLACES: Record<ToastPosition, string> = {
+  "top-right": "top-[calc(3.5rem+env(safe-area-inset-top))] md:top-4",
+  "bottom-right": "bottom-[calc(4.5rem+env(safe-area-inset-bottom))] flex-col-reverse md:bottom-4",
+};
+
+/** The "do this now" toasts, on every page, in the corner picked in Settings. */
+export function NowToasts() {
+  const automation = useAutomation();
+  const { position } = useToastPosition();
+  return (
+    <NowStrip
+      loads={automation.status?.loads}
+      water={automation.status?.water}
+      pending={automation.loadEdit.isPending || automation.questionAnswer.isPending}
+      position={position}
+      onEdit={(edit) => automation.loadEdit.mutate(edit)}
+      onAnswer={(yes) => automation.questionAnswer.mutate(yes)}
+    />
+  );
+}
+
 /**
  * Only what needs the family's hands: switch something on or off, plug in,
  * answer a question, or a charge that must happen today. Nothing to do,
- * nothing shown.
+ * nothing shown. A closed toast comes back when what it says changes.
  */
 export function NowStrip({
   loads,
   water,
   pending,
+  position,
   onEdit,
   onAnswer,
 }: {
   loads: LoadsStatus | undefined;
   water: WaterStatus | undefined;
   pending: boolean;
+  position: ToastPosition;
   onEdit: (edit: LoadEdit) => void;
   onAnswer: (yes: boolean) => void;
 }) {
+  const [closed, setClosed] = useState<string[]>([]);
   if (!loads) return null;
   const items: Item[] = [];
   if (loads.question) {
@@ -97,23 +126,12 @@ export function NowStrip({
         : null;
   const rows: [LoadKind, LoadRow | null][] = [
     ["water", waterRow],
-    ["geyser", loads.geyser.auto ? null : loads.geyser],
     ["hotplate", loads.hotplate],
     ["ev", loads.ev],
   ];
   for (const [kind, row] of rows) {
     const item = row ? rowItem(kind, row, onEdit) : null;
     if (item) items.push(item);
-  }
-  const geyser = loads.geyser;
-  if (!geyser.auto && loads.geyser_required && geyser.running_w == null && geyser.phase === "waiting") {
-    const when = geyser.from ? ` Best from ${clock(geyser.from)}${geyser.until ? ` to ${clock(geyser.until)}` : ""}.` : "";
-    items.push({
-      key: "geyser-today",
-      icon: Flame,
-      text: `Heat the geyser today — ${loads.geyser_required}.${when}`,
-      actions: [],
-    });
   }
   const ev = loads.ev;
   if (ev.charge_today === true && ev.running_w == null && ev.phase === "waiting") {
@@ -126,37 +144,41 @@ export function NowStrip({
       actions: [{ label: "Plugged in", run: () => onEdit(edit("ev", "on")) }],
     });
   }
-  if (items.length === 0) return null;
-
-  const next = rows
-    .filter(([kind, row]) => row?.phase === "waiting" && row.from != null && !items.some((item) => item.key === `${kind}-today`))
-    .sort(([, a], [, b]) => (a?.from ?? "").localeCompare(b?.from ?? ""))[0];
+  const id = (item: Item) => `${item.key}:${item.text}`;
+  const open = items.filter((item) => !closed.includes(id(item)));
+  if (open.length === 0) return null;
 
   return (
-    <section aria-label="Do this now" className="rounded-xl border border-border bg-card px-4 py-3 sm:px-5">
-      <ul className="divide-y divide-border">
-        {items.map((item) => (
-          <li key={item.key} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-2 first:pt-0 last:pb-0">
-            <p className="flex min-w-0 flex-1 items-center gap-2.5 text-sm font-medium">
-              <item.icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-              <span>{item.text}</span>
-            </p>
-            <div className="flex shrink-0 gap-2">
+    <section
+      aria-label="Do this now"
+      className={cn("pointer-events-none fixed inset-x-4 z-50 flex flex-col gap-2 md:left-auto md:right-4 md:w-96", PLACES[position])}
+    >
+      {open.map((item) => (
+        <Card key={item.key} role="status" className="pointer-events-auto p-3 shadow-lg">
+          <div className="flex items-start gap-2.5">
+            <item.icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <p className="min-w-0 flex-1 text-sm font-medium">{item.text}</p>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="-my-1.5 -mr-1.5 size-7 shrink-0"
+              aria-label="Close"
+              onClick={() => setClosed((current) => [...current, id(item)])}
+            >
+              <X />
+            </Button>
+          </div>
+          {item.actions.length > 0 ? (
+            <div className="mt-2 flex justify-end gap-2">
               {item.actions.map((action) => (
                 <Button key={action.label} size="sm" variant={action.primary ? "default" : "ghost"} onClick={action.run} disabled={pending}>
                   {action.primary ? <Check /> : null} {action.label}
                 </Button>
               ))}
             </div>
-          </li>
-        ))}
-      </ul>
-      {next?.[1]?.from ? (
-        <p className="mt-2 text-xs text-muted-foreground">
-          Next: {NAMES[next[0]].toLowerCase()} at {clock(next[1].from)}
-          {next[1].watts != null ? ` (${next[1].watts.toFixed(0)} W)` : ""}
-        </p>
-      ) : null}
+          ) : null}
+        </Card>
+      ))}
     </section>
   );
 }

@@ -4,6 +4,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { useTheme } from "@/hooks/useTheme";
 import { BottomNav, MobileHeader, NavRail, Sidebar, type Tab } from "@/components/layout/AppNav";
+import { NowToasts } from "@/components/dashboard/NowStrip";
 import { PairScreen } from "@/components/remote/PairScreen";
 import { hasPhoneToken, isDesktop, listen, onPairingNeeded } from "@/lib/transport";
 import { DashboardPage } from "@/pages/DashboardPage";
@@ -99,6 +100,7 @@ function Shell() {
           </div>
         </main>
         <BottomNav tab={tab} onSelect={setTab} />
+        <NowToasts />
       </div>
     </div>
   );

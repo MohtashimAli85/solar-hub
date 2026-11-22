@@ -137,6 +137,13 @@ const EARLY_START_MIN_SOC: f64 = 60.0;
 const GEYSER_REMOTE_RECHECK: Duration = Duration::from_secs(600);
 const GEYSER_REMOTE_RETRY: Duration = Duration::from_secs(30);
 const GEYSER_PRESS_GAP: Duration = Duration::from_millis(1500);
+const BATTERY_CHECK_SETTLE: Duration = Duration::from_secs(12);
+const BATTERY_SAMPLES: usize = 5;
+const BATTERY_SAMPLE_GAP: Duration = Duration::from_secs(2);
+const MODE_SWITCH_SETTLE: Duration = Duration::from_secs(20);
+/// After the app flips the mode for a geyser check, the cloud may still show
+/// SBG for a while; that isn't the family taking over.
+const MODE_PROBE_QUIET: Duration = Duration::from_secs(15 * 60);
 const LOADS_AI_ATTEMPTS: usize = 2;
 const LOADS_RECENT_MINUTES: i64 = 90;
 
@@ -701,6 +708,7 @@ pub struct EngineMemory {
     loads_restored: bool,
     loads_saved: Option<loads::SavedLoads>,
     geyser_remote: Option<(String, Instant, bool)>,
+    mode_probe_at: Option<Instant>,
 }
 
 impl EngineMemory {
@@ -1115,18 +1123,31 @@ async fn loads_reminder(
         loads_log(state, now, line);
     }
     if let Some(command) = step.geyser_command {
-        let buttons: Vec<&str> = command.buttons.iter().map(|button| button.as_str()).collect();
-        tracing::info!("geyser: pressing {buttons:?} for {:?} — {}", command.intent, step.status.geyser.row.note.as_deref().unwrap_or(""));
-        let sent = press_geyser(config, &command).await;
-        loads_log(state, now, &serde_json::json!({ "at": now, "pressed": buttons, "ok": sent == loads::Sent::Pressed, "sent": format!("{sent:?}") }));
-        if sent == loads::Sent::Failed {
-            let message = match command.intent {
-                loads::GeyserIntent::Off => "The ESP32 geyser remote didn't answer, so nothing was pressed and the geyser's elements are still on. Switch them off on the panel.",
-                loads::GeyserIntent::On(_) => "The ESP32 geyser remote didn't answer, so nothing was pressed. Back to reminders for today.",
-            };
-            services.notifier.send(loads::GEYSER_TITLE, message);
+        tracing::info!("geyser: pressing {:?} for {:?} — {}", command.buttons, command.intent, step.status.geyser.row.note.as_deref().unwrap_or(""));
+        let night = ctx.clock.window() != Window::Day || now >= ctx.clock.sunset_today;
+        let probe = if night && !config.dry_run { battery_probe(services, memory, reading).await } else { None };
+        let mut before = match probe {
+            Some(_) => battery_draw_w(services.battery).await,
+            None => None,
+        };
+        let mut next = Some((command, false));
+        while let Some((command, undoing)) = next.take() {
+            let sent = press_and_record(state, services, memory, &command, now, config).await;
+            let Some(before_w) = before.filter(|_| sent != loads::Sent::Failed) else { break };
+            tokio::time::sleep(BATTERY_CHECK_SETTLE).await;
+            let Some(after_w) = battery_draw_w(services.battery).await else { break };
+            let check = loads::BatteryCheck { before_w, after_w };
+            loads_log(state, now, &serde_json::json!({ "at": now, "battery_check": { "before_w": before_w, "after_w": after_w, "undoing": undoing } }));
+            let (again, message) = memory.loads.geyser_battery_checked(&command, check, undoing, now, config);
+            if let Some(message) = message {
+                services.notifier.send(loads::GEYSER_TITLE, &message);
+            }
+            before = Some(after_w);
+            next = again.map(|again| (again, true));
         }
-        memory.loads.geyser_sent(&command, now, sent);
+        if let Some(restore) = probe.flatten() {
+            restore_mode(services, memory, restore).await;
+        }
     }
     if let Some(power_cycle) = step.ev_read {
         spawn_scooter_read(state, services, config, power_cycle);
@@ -1227,6 +1248,79 @@ async fn geyser_remote_ready(memory: &mut EngineMemory, config: &AutomationConfi
     };
     memory.geyser_remote = Some((host.clone(), Instant::now(), ready));
     ready
+}
+
+async fn press_and_record(
+    state: &AutomationState,
+    services: &Services<'_>,
+    memory: &mut EngineMemory,
+    command: &GeyserCommand,
+    now: NaiveDateTime,
+    config: &AutomationConfig,
+) -> loads::Sent {
+    let buttons: Vec<&str> = command.buttons.iter().map(|button| button.as_str()).collect();
+    let sent = press_geyser(config, command).await;
+    loads_log(state, now, &serde_json::json!({ "at": now, "pressed": buttons, "ok": sent == loads::Sent::Pressed, "sent": format!("{sent:?}") }));
+    if sent == loads::Sent::Failed {
+        let message = match command.intent {
+            loads::GeyserIntent::Off => "The ESP32 geyser remote didn't answer, so nothing was pressed and the geyser's elements are still on. Switch them off on the panel.",
+            loads::GeyserIntent::On(_) => "The ESP32 geyser remote didn't answer, so nothing was pressed. Back to reminders for today.",
+        };
+        services.notifier.send(loads::GEYSER_TITLE, message);
+    }
+    memory.loads.geyser_sent(command, now, sent);
+    sent
+}
+
+/// At night a press is read on the live battery, which needs the battery to
+/// carry the house: with the grid on and the inverter not in SBG, it goes to
+/// SBG for the check. `Some(restore)` means the check can run; `restore`
+/// holds the mode to put back afterwards, if one was changed.
+async fn battery_probe(services: &Services<'_>, memory: &mut EngineMemory, reading: &EngineReading) -> Option<Option<u32>> {
+    if !services.battery.connection_status().await.connected {
+        return None;
+    }
+    if reading.mode == Some(SBG_MODE) || reading.grid_on() == Some(false) {
+        return Some(None);
+    }
+    let previous = reading.mode?;
+    if let Err(error) = services.client.write_output_priority(None, SBG_MODE.to_string()).await {
+        tracing::warn!("geyser check: could not switch to SBG: {error}");
+        return None;
+    }
+    tracing::info!("geyser check: SBG for a minute so the battery shows the press");
+    memory.mode_probe_at = Some(Instant::now());
+    tokio::time::sleep(MODE_SWITCH_SETTLE).await;
+    Some(Some(previous))
+}
+
+async fn restore_mode(services: &Services<'_>, memory: &mut EngineMemory, mode: u32) {
+    for attempt in 1..=2 {
+        match services.client.write_output_priority(None, mode.to_string()).await {
+            Ok(_) => {
+                tracing::info!("geyser check: output mode back to {mode}");
+                memory.mode_probe_at = Some(Instant::now());
+                return;
+            }
+            Err(error) => tracing::warn!("geyser check: could not put the output mode back (attempt {attempt}): {error}"),
+        }
+    }
+    services.notifier.send(loads::GEYSER_TITLE, "The app switched the inverter to SBG to check the geyser and couldn't switch it back. Check the output mode.");
+}
+
+/// The battery's draw in watts (discharge positive), averaged over a few
+/// BMS frames so one fridge compressor kick doesn't decide it.
+async fn battery_draw_w(battery: &BatteryState) -> Option<f64> {
+    let mut samples = Vec::new();
+    for index in 0..BATTERY_SAMPLES {
+        if index > 0 {
+            tokio::time::sleep(BATTERY_SAMPLE_GAP).await;
+        }
+        if let Some(bms) = battery.latest_snapshot().await.filter(|bms| bms.voltage > 0.0) {
+            samples.push(-bms.current * bms.voltage);
+        }
+    }
+    (samples.len() >= 3).then(|| samples.iter().sum::<f64>() / samples.len() as f64)
 }
 
 async fn press_geyser(config: &AutomationConfig, command: &GeyserCommand) -> loads::Sent {
@@ -1974,8 +2068,9 @@ async fn night_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
         }
     }
 
+    let probe_quiet = memory.mode_probe_at.is_none_or(|at| at.elapsed() >= MODE_PROBE_QUIET);
     let interrupted = guardrails::below_floor(soc, config.min_soc_percent)
-        || guardrails::user_took_over(reading.mode, memory.night.last_written_mode, config.dry_run);
+        || (probe_quiet && guardrails::user_took_over(reading.mode, memory.night.last_written_mode, config.dry_run));
     if interrupted {
         if let Some(boost) = memory.night.boost.take() {
             if boost.smart_load_was_on {
@@ -1997,7 +2092,7 @@ async fn night_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
         return FAST_TICK;
     }
 
-    if guardrails::user_took_over(reading.mode, memory.night.last_written_mode, config.dry_run) {
+    if probe_quiet && guardrails::user_took_over(reading.mode, memory.night.last_written_mode, config.dry_run) {
         if memory.night.phase != NightPhase::Paused {
             memory.night.phase = NightPhase::Paused;
             engine
@@ -2534,7 +2629,8 @@ fn sbg_not_draining(reading: &EngineReading) -> bool {
 /// The inverter sometimes sits on SBG without covering the shortfall from the
 /// battery; switching to Solar and back to SBG makes it re-apply the setting.
 async fn recover_stuck_sbg(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &EngineReading) -> Option<Duration> {
-    if engine.config.dry_run || !sbg_not_draining(reading) {
+    let probing = memory.mode_probe_at.is_some_and(|at| at.elapsed() < MODE_PROBE_QUIET);
+    if engine.config.dry_run || probing || !sbg_not_draining(reading) {
         memory.stuck_sbg_since = None;
         return None;
     }
@@ -2654,6 +2750,7 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
     let now = ctx.clock.now;
     let grid_loads = memory.loads.grid_now().map(str::to_string);
     let sun_load = memory.loads.sun_only_load();
+    let probe_quiet = memory.mode_probe_at.is_none_or(|at| at.elapsed() >= MODE_PROBE_QUIET);
     let day = &mut memory.day;
     if let Some(hold) = day.user_hold_until {
         if now < hold {
@@ -2664,7 +2761,7 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
         day.user_hold_until = None;
         day.next_check_at = None;
     }
-    if guardrails::user_took_over(reading.mode, day.last_written_mode, config.dry_run) {
+    if probe_quiet && guardrails::user_took_over(reading.mode, day.last_written_mode, config.dry_run) {
         let hold = (now + chrono::Duration::minutes(USER_HOLD_MINUTES)).min(ctx.clock.evening_start_on(now.date()));
         day.user_hold_until = Some(hold);
         day.last_written_mode = reading.mode;
