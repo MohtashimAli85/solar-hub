@@ -3,7 +3,6 @@ import { GeyserHeatTime } from "./GeyserHeatTime";
 import { clock, modelLabel } from "@/components/automation/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Toggle } from "@/components/ui/toggle";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger } from "@/components/ui/select";
 import type {
   AutomationConfig,
@@ -230,7 +229,11 @@ function ElementDot({ state }: { state: ElementState }) {
   );
 }
 
-/** The two element switches as the app believes they are, like the panel's own lights; with the ESP32, each one presses its button. */
+/**
+ * The two element lights as the app has seen them, like the panel's own
+ * lights. With the ESP32, plain 800 W and 1200 W buttons press the remote's
+ * buttons; the lights then follow what the load or the battery shows.
+ */
 function ElementLights({
   elements,
   levels,
@@ -249,38 +252,33 @@ function ElementLights({
   const when = elements.at ? ` at ${clock(elements.at)}` : "";
   const summary = lights.map(([watts, state]) => `${watts} W ${ELEMENT_STATES[state]}`).join(", ");
   return (
-    <div
-      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
-      role={onToggle ? "group" : "img"}
-      aria-label={`Elements: ${summary}${elements.unsure ? ", not sure" : ""}. From ${elements.why}${when}.`}
-    >
-      {lights.map(([watts, state, name]) =>
-        onToggle ? (
-          <Toggle
-            key={watts}
-            size="sm"
-            variant="outline"
-            className="tabular-nums"
-            pressed={state !== "off"}
-            onPressedChange={() => onToggle(name)}
-            disabled={busy}
-            aria-label={`${watts} W element, ${ELEMENT_STATES[state]}. Press to switch it ${state === "off" ? "on" : "off"}.`}
-          >
-            <ElementDot state={state} />
-            {watts}
-          </Toggle>
-        ) : (
+    <div className="space-y-1.5">
+      <div
+        className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+        role="img"
+        aria-label={`Elements: ${summary}${elements.unsure ? ", not sure" : ""}. From ${elements.why}${when}.`}
+      >
+        {lights.map(([watts, state]) => (
           <span key={watts} className="inline-flex items-center gap-1.5 tabular-nums">
             <ElementDot state={state} />
             {watts}
           </span>
-        ),
-      )}
-      <span className="truncate">
-        {elements.unsure ? "Not sure: " : ""}
-        {elements.why}
-        {elements.unsure ? "" : when}
-      </span>
+        ))}
+        <span className="truncate">
+          {elements.unsure ? "Not sure: " : ""}
+          {elements.why}
+          {elements.unsure ? "" : when}
+        </span>
+      </div>
+      {onToggle ? (
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Geyser remote">
+          {lights.map(([watts, , name]) => (
+            <Button key={name} size="sm" variant="outline" className="tabular-nums" onClick={() => onToggle(name)} disabled={busy}>
+              {watts} W
+            </Button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

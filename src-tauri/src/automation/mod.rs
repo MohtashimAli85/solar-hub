@@ -132,6 +132,9 @@ pub struct AutomationState {
     /// the old state is dropped instead of making them wait for it.
     pub loads_changed: Arc<Notify>,
     pub loads_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// A mode write that errored, and when: the inverter may still have taken
+    /// it, so seeing that mode next isn't the family taking over.
+    pub failed_mode_write: Arc<std::sync::Mutex<Option<(u32, std::time::Instant)>>>,
 }
 
 impl AutomationState {
@@ -161,6 +164,7 @@ impl AutomationState {
             geyser_request: Arc::new(Mutex::new(None)),
             loads_changed: Arc::new(Notify::new()),
             loads_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            failed_mode_write: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 

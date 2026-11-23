@@ -144,6 +144,7 @@ const MODE_SWITCH_SETTLE: Duration = Duration::from_secs(20);
 /// After the app flips the mode for a geyser check, the cloud may still show
 /// SBG for a while; that isn't the family taking over.
 const MODE_PROBE_QUIET: Duration = Duration::from_secs(15 * 60);
+const LATE_WRITE_WINDOW: Duration = Duration::from_secs(60 * 60);
 const LOADS_AI_ATTEMPTS: usize = 2;
 const LOADS_RECENT_MINUTES: i64 = 90;
 
@@ -530,10 +531,16 @@ impl Engine<'_> {
         if self.config.dry_run {
             return true;
         }
-        match self.client.write_output_priority(None, mode.to_string()).await {
-            Ok(_) => true,
+        let result = self.client.write_output_priority(None, mode.to_string()).await;
+        let mut failed = self.state.failed_mode_write.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match result {
+            Ok(_) => {
+                *failed = None;
+                true
+            }
             Err(error) => {
                 tracing::warn!("automation could not write output mode {mode}: {error}");
+                *failed = Some((mode, Instant::now()));
                 false
             }
         }
@@ -1248,6 +1255,23 @@ async fn geyser_remote_ready(memory: &mut EngineMemory, config: &AutomationConfi
     };
     memory.geyser_remote = Some((host.clone(), Instant::now(), ready));
     ready
+}
+
+/// A mode write that errored (often the Mac half-asleep) may still have
+/// reached the inverter. When the mode it asked for shows up, that was the
+/// app's own change, so it is taken as written instead of as the family
+/// taking over.
+fn adopt_late_write(engine: &Engine<'_>, written: &mut Option<u32>, effective: &mut Option<u32>, reading: &EngineReading) {
+    let mut failed = engine.state.failed_mode_write.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some((mode, at)) = *failed else { return };
+    if at.elapsed() > LATE_WRITE_WINDOW {
+        *failed = None;
+    } else if reading.mode == Some(mode) {
+        tracing::info!("output mode {mode} showed up after a write that errored: taken as the app's own");
+        *written = Some(mode);
+        *effective = Some(mode);
+        *failed = None;
+    }
 }
 
 async fn press_and_record(
@@ -2068,6 +2092,7 @@ async fn night_tick(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
         }
     }
 
+    adopt_late_write(engine, &mut memory.night.last_written_mode, &mut memory.night.effective_mode, reading);
     let probe_quiet = memory.mode_probe_at.is_none_or(|at| at.elapsed() >= MODE_PROBE_QUIET);
     let interrupted = guardrails::below_floor(soc, config.min_soc_percent)
         || (probe_quiet && guardrails::user_took_over(reading.mode, memory.night.last_written_mode, config.dry_run));
@@ -2751,6 +2776,7 @@ async fn day_decide(engine: &Engine<'_>, memory: &mut EngineMemory, reading: &En
     let grid_loads = memory.loads.grid_now().map(str::to_string);
     let sun_load = memory.loads.sun_only_load();
     let probe_quiet = memory.mode_probe_at.is_none_or(|at| at.elapsed() >= MODE_PROBE_QUIET);
+    adopt_late_write(engine, &mut memory.day.last_written_mode, &mut memory.day.effective_mode, reading);
     let day = &mut memory.day;
     if let Some(hold) = day.user_hold_until {
         if now < hold {
@@ -3563,6 +3589,22 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn a_mode_the_app_tried_to_write_is_its_own_when_it_shows_up_late() {
+        let harness = Harness::new(false);
+        let agent = FakeAgent::new(Vec::new());
+        let engine = harness.engine(&agent);
+        let (mut written, mut effective) = (Some(SBG_MODE), Some(SBG_MODE));
+        *harness.state.failed_mode_write.lock().unwrap() = Some((SOLAR_MODE, Instant::now()));
+        adopt_late_write(&engine, &mut written, &mut effective, &reading(50.0, SOLAR_MODE, 200.0));
+        assert_eq!((written, effective), (Some(SOLAR_MODE), Some(SOLAR_MODE)));
+        assert!(!guardrails::user_took_over(Some(SOLAR_MODE), written, false));
+
+        let (mut written, mut effective) = (Some(SBG_MODE), Some(SBG_MODE));
+        adopt_late_write(&engine, &mut written, &mut effective, &reading(50.0, SOLAR_MODE, 200.0));
+        assert_eq!(written, Some(SBG_MODE), "with no failed write, a different mode is still the family's");
     }
 
     fn reading(soc: f64, mode: u32, load_w: f64) -> EngineReading {
