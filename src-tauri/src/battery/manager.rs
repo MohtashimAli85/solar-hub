@@ -291,7 +291,7 @@ async fn bluetooth_powered_off(central: &Adapter) -> bool {
 /// turns it back on, and only asks the user when that doesn't work.
 fn handle_bluetooth_off(state: BatteryState, app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        if !load_saved_ble_device(&app).is_some_and(|device| !device.id.is_empty()) {
+        if !load_saved_ble_device(&app).is_some_and(|device| device.is_set()) {
             return;
         }
         if state.inner.bluetooth_off_handled.swap(true, Ordering::SeqCst) {
@@ -392,7 +392,7 @@ pub fn spawn_disconnect_watcher(state: BatteryState, app: AppHandle) {
 pub fn spawn_reconnect_loop(state: BatteryState, app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         match load_saved_ble_device(&app) {
-            Some(device) if !device.id.is_empty() => {}
+            Some(device) if device.is_set() => {}
             _ => return,
         }
         {
@@ -653,7 +653,7 @@ pub async fn disconnect_device(state: &BatteryState, app: &AppHandle) -> Result<
 
 pub async fn reconnect_saved(state: &BatteryState, app: &AppHandle) -> Result<(), String> {
     let saved = match load_saved_ble_device(app) {
-        Some(device) if !device.id.is_empty() => device,
+        Some(device) if device.is_set() => device,
         _ => {
             return Err(
                 "No saved BMS device found. Scan and connect once before using saved reconnect."
@@ -671,6 +671,7 @@ pub async fn reconnect_saved(state: &BatteryState, app: &AppHandle) -> Result<()
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     if let Ok(saved_uuid) = saved.id.parse::<uuid::Uuid>() {
         let central = get_central(state).await?;
         let retrieved = central
@@ -692,9 +693,15 @@ pub async fn reconnect_saved(state: &BatteryState, app: &AppHandle) -> Result<()
         }
     }
 
-    let devices = scan_devices_inner(state, Some(&saved.id)).await?;
-    if devices.iter().any(|device| device.id == saved.id) {
-        return connect_device(state, app, &saved.id).await;
+    let target = (!saved.id.is_empty()).then_some(saved.id.as_str());
+    let devices = scan_devices_inner(state, target).await?;
+    if let Some(device) = devices
+        .iter()
+        .find(|device| device.id == saved.id)
+        .or_else(|| devices.iter().find(|device| saved.id.is_empty() && device.name == saved.name))
+    {
+        let id = device.id.clone();
+        return connect_device(state, app, &id).await;
     }
     Err("Previously saved BMS was not found. Move closer and scan again.".to_string())
 }

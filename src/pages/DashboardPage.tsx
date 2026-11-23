@@ -65,43 +65,45 @@ export function DashboardPage({ onOpenAutomation }: { onOpenAutomation: () => vo
         </div>
       </div>
 
-      <SunCurveCard
-        forecast={automation.insights?.weather?.today_pv}
-        measured={automation.insights?.weather?.today_measured}
-        fetchedAt={automation.insights?.weather?.fetched_at}
-        refreshing={automation.refreshingForecast}
-        onRefresh={() => automation.forecastRefresh.mutate()}
-      />
+      <div className="grid gap-4 xl:grid-cols-2 xl:[&>:only-child]:col-span-2">
+        <SunCurveCard
+          forecast={automation.insights?.weather?.today_pv}
+          measured={automation.insights?.weather?.today_measured}
+          fetchedAt={automation.insights?.weather?.fetched_at}
+          refreshing={automation.refreshingForecast}
+          onRefresh={() => automation.forecastRefresh.mutate()}
+        />
 
-      <SolarLoadsCard
-        water={automation.status?.water}
-        loads={automation.status?.loads}
-        waterPending={automation.waterDone.isPending}
-        geyserPending={automation.geyserDone.isPending}
-        scooterPending={automation.scooterRead.isPending}
-        skipPending={automation.scooterSkip.isPending}
-        hotplatePending={automation.hotplateFinish.isPending || automation.hotplateSkip.isPending}
-        editPending={automation.loadEdit.isPending}
-        config={automation.config}
-        geyserLevels={geyserLevels(automation.config)}
-        onWaterDone={() => automation.waterDone.mutate()}
-        onGeyserDone={() => automation.geyserDone.mutate()}
-        onSwitchGeyser={(watts) => automation.geyserSwitch.mutate(watts)}
-        onToggleElement={(name) => automation.geyserToggle.mutate(name)}
-        togglePending={automation.geyserToggle.isPending}
-        switchError={
-          automation.geyserSwitch.error
-            ? String(automation.geyserSwitch.error)
-            : automation.geyserToggle.error
-              ? String(automation.geyserToggle.error)
-              : null
-        }
-        onReadScooter={() => automation.scooterRead.mutate(true)}
-        onSkipScooter={() => automation.scooterSkip.mutate()}
-        onEdit={(edit) => automation.loadEdit.mutate(edit)}
-        onHotplateDone={() => automation.hotplateFinish.mutate()}
-        onHotplateSkip={() => automation.hotplateSkip.mutate()}
-      />
+        <SolarLoadsCard
+          water={automation.status?.water}
+          loads={automation.status?.loads}
+          waterPending={automation.waterDone.isPending}
+          geyserPending={automation.geyserDone.isPending}
+          scooterPending={automation.scooterRead.isPending}
+          skipPending={automation.scooterSkip.isPending}
+          hotplatePending={automation.hotplateFinish.isPending || automation.hotplateSkip.isPending}
+          editPending={automation.loadEdit.isPending}
+          config={automation.config}
+          geyserLevels={geyserLevels(automation.config)}
+          onWaterDone={() => automation.waterDone.mutate()}
+          onGeyserDone={() => automation.geyserDone.mutate()}
+          onSwitchGeyser={(watts) => automation.geyserSwitch.mutate(watts)}
+          onToggleElement={(name) => automation.geyserToggle.mutate(name)}
+          togglePending={automation.geyserToggle.isPending}
+          switchError={
+            automation.geyserSwitch.error
+              ? String(automation.geyserSwitch.error)
+              : automation.geyserToggle.error
+                ? String(automation.geyserToggle.error)
+                : null
+          }
+          onReadScooter={() => automation.scooterRead.mutate(true)}
+          onSkipScooter={() => automation.scooterSkip.mutate()}
+          onEdit={(edit) => automation.loadEdit.mutate(edit)}
+          onHotplateDone={() => automation.hotplateFinish.mutate()}
+          onHotplateSkip={() => automation.hotplateSkip.mutate()}
+        />
+      </div>
 
       <UnitsCard />
 

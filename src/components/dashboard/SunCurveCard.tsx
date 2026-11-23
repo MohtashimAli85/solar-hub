@@ -151,7 +151,7 @@ export function SunCurveCard({
           </p>
         ) : null}
       </div>
-      <div className="h-44" role="img" aria-label={`Expected solar output today against the real output so far. ${summary}.`}>
+      <div className="min-h-44 flex-1" role="img" aria-label={`Expected solar output today against the real output so far. ${summary}.`}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={rows} margin={{ top: 8, right: 0, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} stroke={VIZ.grid} />

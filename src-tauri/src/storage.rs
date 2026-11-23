@@ -34,6 +34,12 @@ pub struct SavedBleDevice {
     pub name: String,
 }
 
+impl SavedBleDevice {
+    pub fn is_set(&self) -> bool {
+        !self.id.is_empty() || !self.name.is_empty()
+    }
+}
+
 pub fn load_app_settings(app: &AppHandle) -> AppSettings {
     app.store(SETTINGS_STORE)
         .ok()
@@ -214,6 +220,7 @@ const SOLAR_PASSWORD_ACCOUNT: &str = "solar-password";
 const GEMINI_API_KEY_ACCOUNT: &str = "gemini-api-key";
 const GROQ_API_KEY_ACCOUNT: &str = "groq-api-key";
 
+#[cfg(not(target_os = "android"))]
 fn keychain_get(account: &str) -> Result<Option<String>, String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|error| error.to_string())?;
     match entry.get_password() {
@@ -223,11 +230,13 @@ fn keychain_get(account: &str) -> Result<Option<String>, String> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn keychain_set(account: &str, value: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|error| error.to_string())?;
     entry.set_password(value).map_err(|error| error.to_string())
 }
 
+#[cfg(not(target_os = "android"))]
 fn keychain_clear(account: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|error| error.to_string())?;
     match entry.delete_credential() {
@@ -235,6 +244,54 @@ fn keychain_clear(account: &str) -> Result<(), String> {
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(other) => Err(other.to_string()),
     }
+}
+
+#[cfg(target_os = "android")]
+static SECRETS_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+pub fn init_secrets_file(path: std::path::PathBuf) {
+    let _ = SECRETS_FILE.set(path);
+}
+
+#[cfg(target_os = "android")]
+fn read_secrets() -> serde_json::Map<String, serde_json::Value> {
+    SECRETS_FILE
+        .get()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "android")]
+fn write_secrets(secrets: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    let path = SECRETS_FILE.get().ok_or("Secret storage is not ready yet")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+    let bytes = serde_json::to_vec(secrets).map_err(|error| error.to_string())?;
+    std::fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "android")]
+fn keychain_get(account: &str) -> Result<Option<String>, String> {
+    Ok(read_secrets().get(account).and_then(|value| value.as_str()).map(str::to_string))
+}
+
+#[cfg(target_os = "android")]
+fn keychain_set(account: &str, value: &str) -> Result<(), String> {
+    let mut secrets = read_secrets();
+    secrets.insert(account.to_string(), json!(value));
+    write_secrets(&secrets)
+}
+
+#[cfg(target_os = "android")]
+fn keychain_clear(account: &str) -> Result<(), String> {
+    let mut secrets = read_secrets();
+    if secrets.remove(account).is_some() {
+        write_secrets(&secrets)?;
+    }
+    Ok(())
 }
 
 /// Stores a secret, or removes it when `value` is empty.

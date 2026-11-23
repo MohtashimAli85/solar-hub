@@ -1,8 +1,9 @@
 use std::convert::Infallible;
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -45,7 +46,31 @@ pub(super) fn router(ctx: Ctx) -> Router {
         .route("/api/invoke/{command}", post(invoke))
         .route("/api/events", get(events))
         .fallback(asset)
+        .layer(middleware::from_fn(allow_android_app))
         .with_state(ctx)
+}
+
+const ANDROID_APP_ORIGINS: &[&str] = &["http://tauri.localhost", "https://tauri.localhost"];
+
+async fn allow_android_app(request: Request, next: Next) -> Response {
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .filter(|origin| ANDROID_APP_ORIGINS.iter().any(|allowed| origin.as_bytes() == allowed.as_bytes()))
+        .cloned();
+    let mut response = if origin.is_some() && request.method() == Method::OPTIONS {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(request).await
+    };
+    if let Some(origin) = origin {
+        let headers = response.headers_mut();
+        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("authorization, content-type"));
+        headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, OPTIONS"));
+        headers.insert(header::VARY, HeaderValue::from_static("origin"));
+    }
+    response
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -157,6 +182,7 @@ async fn dispatch(app: &AppHandle, command: &str, args: &Value) -> Result<Option
         ),
         "get_device_details" => to_json(inv::get_device_details(app.state(), arg(args, "deviceId")?).await),
         "get_solar_settings" => to_json(inv::get_solar_settings(app.clone()).await),
+        "get_phone_setup" => to_json(phone_setup(app)),
 
         "get_automation_status" => to_json(auto::get_automation_status(app.state()).await),
         "get_automation_config" => to_json(auto::get_automation_config(app.state()).await),
@@ -213,6 +239,23 @@ async fn dispatch(app: &AppHandle, command: &str, args: &Value) -> Result<Option
 
         _ => Ok(None),
     }
+}
+
+#[derive(Serialize)]
+struct PhoneSetup {
+    settings: crate::storage::AppSettings,
+    password: String,
+    bms_name: Option<String>,
+}
+
+fn phone_setup(app: &AppHandle) -> Result<PhoneSetup, String> {
+    Ok(PhoneSetup {
+        settings: crate::storage::load_app_settings(app),
+        password: crate::storage::get_solar_password()?.unwrap_or_default(),
+        bms_name: crate::storage::load_saved_ble_device(app)
+            .map(|device| device.name)
+            .filter(|name| !name.is_empty()),
+    })
 }
 
 #[derive(Deserialize)]

@@ -9,7 +9,8 @@ import { fmtNumber } from "@/lib/format";
 import { useBatteryDevice } from "@/hooks/useBatteryDevice";
 import { useBatteryHistory } from "@/hooks/useBatteryHistory";
 import { getSavedBmsDevice } from "@/lib/tauri";
-import { isDesktop } from "@/lib/transport";
+import { useLink } from "@/hooks/useLink";
+import { isAndroidApp, isDesktop } from "@/lib/transport";
 import type { SavedBleDevice } from "@/lib/types";
 import { AlertCircle, X } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -18,6 +19,8 @@ export function BatteryPage() {
   const battery = useBatteryDevice();
   const [saved, setSaved] = useState<SavedBleDevice | null>(null);
   const history = useBatteryHistory(battery.snapshot);
+  const link = useLink();
+  const canPickBattery = isDesktop || (isAndroidApp && link.mode === "direct");
 
   useEffect(() => {
     getSavedBmsDevice().then((device) => {
@@ -54,7 +57,7 @@ export function BatteryPage() {
         </div>
       ) : null}
 
-      {isDesktop ? (
+      {canPickBattery ? (
         <DeviceSelector
           devices={battery.devices}
           connection={battery.connection}
@@ -69,7 +72,7 @@ export function BatteryPage() {
       ) : null}
 
       {!battery.snapshot ? (
-        <EmptyState message={isDesktop ? "Connect a battery to see telemetry." : "Connect the battery from the desktop app to see telemetry."} />
+        <EmptyState message={canPickBattery ? "Connect a battery to see telemetry." : "Connect the battery from the desktop app to see telemetry."} />
       ) : (
         <>
           <PackHealthHero snapshot={battery.snapshot} />

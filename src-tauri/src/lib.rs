@@ -15,6 +15,8 @@ pub mod energy;
 pub mod events;
 pub mod geyser;
 pub mod inverter;
+#[cfg(target_os = "android")]
+pub mod mobile;
 pub mod notifications;
 pub mod remote;
 pub mod resume;
@@ -47,34 +49,90 @@ fn init_logging(log_dir: &std::path::Path) -> LogGuard {
     LogGuard(guard)
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+fn solar_client(handle: &tauri::AppHandle) -> SolarClient {
+    let settings = load_app_settings(handle);
+    let password = get_solar_password()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    SolarClient::new(SolarCredentials {
+        user_id: settings.user_id.clone(),
+        password,
+        station_id: settings.station_id.clone(),
+        device_id: settings.device_id.clone(),
+        time_zone: settings.time_zone.clone(),
+    })
+}
+
+fn start_logging(app: &tauri::App) -> tauri::AppHandle {
+    let handle = app.handle().clone();
+    let log_dir = handle
+        .path()
+        .app_log_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let log_guard = init_logging(&log_dir);
+    tracing::info!("solar-hub starting, logging to {}", log_dir.display());
+    app.manage(log_guard);
+    handle
+}
+
+#[cfg(target_os = "android")]
+#[tauri::mobile_entry_point]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .setup(|app| {
+            let handle = start_logging(app);
+            if let Ok(dir) = handle.path().app_data_dir() {
+                storage::init_secrets_file(dir.join("secrets.json"));
+            }
+            let battery = BatteryState::new();
+            app.manage(InverterState::new(solar_client(&handle)));
+            app.manage(battery.clone());
+            battery::manager::spawn_disconnect_watcher(battery, handle);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            battery::commands::scan_bms_devices,
+            battery::commands::get_battery_state,
+            battery::commands::get_battery_connection,
+            battery::commands::connect_bms_device,
+            battery::commands::disconnect_bms_device,
+            battery::commands::get_saved_bms_device,
+            battery::commands::set_saved_bms_device,
+            battery::commands::reconnect_saved_bms,
+            inverter::commands::get_inverter_snapshot,
+            inverter::commands::get_inverter_settings,
+            inverter::commands::set_output_priority,
+            inverter::commands::set_charger_priority,
+            inverter::commands::set_ac_input_range,
+            inverter::commands::set_grid_feed_in,
+            inverter::commands::set_smart_load,
+            inverter::commands::set_low_battery_cutoff_voltage,
+            inverter::commands::set_high_cutoff_voltage,
+            inverter::commands::set_low_dc_cutoff_soc,
+            inverter::commands::set_max_total_charge_current,
+            inverter::commands::set_max_utility_charge_current,
+            inverter::commands::get_device_details,
+            inverter::commands::get_solar_settings,
+            mobile::find_mac,
+            mobile::import_mac_setup,
+            mobile::set_direct_mode,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+#[cfg(not(target_os = "android"))]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            let handle = app.handle().clone();
-            let log_dir = handle
-                .path()
-                .app_log_dir()
-                .unwrap_or_else(|_| std::env::temp_dir());
-            let log_guard = init_logging(&log_dir);
-            tracing::info!("solar-hub starting, logging to {}", log_dir.display());
-            app.manage(log_guard);
-
-            let settings = load_app_settings(&handle);
-            let password = get_solar_password()
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let client = SolarClient::new(SolarCredentials {
-                user_id: settings.user_id.clone(),
-                password,
-                station_id: settings.station_id.clone(),
-                device_id: settings.device_id.clone(),
-                time_zone: settings.time_zone.clone(),
-            });
+            let handle = start_logging(app);
+            let client = solar_client(&handle);
 
             let inverter = InverterState::new(client.clone());
             let battery = BatteryState::new();

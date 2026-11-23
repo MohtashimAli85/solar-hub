@@ -1,11 +1,12 @@
 import { PhoneAccessCard } from "@/components/settings/PhoneAccessCard";
+import { PhoneLinkCard } from "@/components/settings/PhoneLinkCard";
 import { RemindersCard } from "@/components/settings/RemindersCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
 import { useEffect, useState } from "react";
 import { getSolarSettings, updateSolarSettings } from "@/lib/tauri";
-import { isDesktop } from "@/lib/transport";
+import { isAndroidApp, isDesktop } from "@/lib/transport";
 import { TZ_PRESETS } from "@/lib/types";
 import type { AppSettings } from "@/lib/types";
 import { Save } from "lucide-react";
@@ -110,7 +111,7 @@ export function SettingsPage() {
           <CardTitle>Solar of Things</CardTitle>
           <CardDescription>
             Account used to reach the inverter cloud. The password is stored in the macOS keychain,
-            never on disk.
+            never on disk.{isAndroidApp ? " This phone keeps a copy from the Mac so it can read the inverter when the Mac is off." : ""}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -190,6 +191,7 @@ export function SettingsPage() {
 
       <RemindersCard />
       {isDesktop ? <PhoneAccessCard /> : null}
+      {isAndroidApp ? <PhoneLinkCard /> : null}
     </div>
   );
 }

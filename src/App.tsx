@@ -4,9 +4,10 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { useTheme } from "@/hooks/useTheme";
 import { BottomNav, MobileHeader, NavRail, Sidebar, type Tab } from "@/components/layout/AppNav";
+import { DecisionBanner, LinkBanner } from "@/components/remote/LinkBanner";
 import { NowToasts } from "@/components/dashboard/NowStrip";
 import { PairScreen } from "@/components/remote/PairScreen";
-import { hasPhoneToken, isDesktop, listen, onPairingNeeded } from "@/lib/transport";
+import { hasPhoneToken, isAndroidApp, isDesktop, listen, onLinkChange, onPairingNeeded, startAndroidLink } from "@/lib/transport";
 import { DashboardPage } from "@/pages/DashboardPage";
 
 const AutomationPage = lazy(() => import("@/pages/AutomationPage").then((m) => ({ default: m.AutomationPage })));
@@ -34,6 +35,13 @@ function Shell() {
     if (isDesktop) return;
     return onPairingNeeded(() => setPaired(false));
   }, []);
+
+  useEffect(() => {
+    if (!isAndroidApp || !paired) return;
+    const off = onLinkChange(() => void queryClient.invalidateQueries());
+    void startAndroidLink();
+    return off;
+  }, [paired]);
 
   useEffect(() => {
     const unlisten = listen("system://resumed", () => {
@@ -83,6 +91,7 @@ function Shell() {
           <Loader2 className="size-3 animate-spin" /> Refreshing…
         </Badge>
       ) : null}
+      {isAndroidApp ? <DecisionBanner /> : null}
       <Sidebar tab={tab} onSelect={setTab} theme={theme} onToggleTheme={toggleTheme} />
       <NavRail tab={tab} onSelect={setTab} theme={theme} onToggleTheme={toggleTheme} />
 
@@ -90,6 +99,7 @@ function Shell() {
         <MobileHeader theme={theme} onToggleTheme={toggleTheme} />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4 md:p-5 lg:p-6">
           <div className="mx-auto w-full max-w-[1600px]">
+            {isAndroidApp ? <LinkBanner /> : null}
             <Suspense fallback={<PageFallback />}>
               {tab === "dashboard" ? <DashboardPage onOpenAutomation={() => setTab("automation")} /> : null}
               {tab === "battery" ? <BatteryPage /> : null}
